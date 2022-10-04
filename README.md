@@ -6,6 +6,7 @@ User provisioning from BambooHR to AzAD
 3. Insert BHR API key
 4. Create AzAD Enterprise app for unattended auth via a certificate, for AzAD objects management + ExchangeOnline management
 5. Modules needed: MGGraph module, ExchangeOnlineManagement module
+
 The script will extract the employee data from BambooHR, then, for the data of each user, there are 3 operating blocks, that will run if the conditions are fulfilled. The 3 blocks are:
 						1. Attribute corrections - if the user has an existing account , and is an active employee, and, the last changed time in AzAD differs from BambooHR, then 
                         this first block will compare each of the AzAD User object attributes with the data extracted from BHR and correct them if necessary
