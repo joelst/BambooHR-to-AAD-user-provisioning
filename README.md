@@ -1,4 +1,4 @@
-# BHR-to-AzAD-user-provisioning
+# BambooHR to Azure AD user provisioning
 User provisioning from BambooHR to AzAD
 
 1. Make sure to replace the word "domain" with your domain name
@@ -8,42 +8,38 @@ User provisioning from BambooHR to AzAD
 5. Modules needed: MGGraph module, ExchangeOnlineManagement module
 
 The script will extract the employee data from BambooHR, then, for the data of each user, there are 3 operating blocks, that will run if the conditions are fulfilled. The 3 blocks are:
-						1. Attribute corrections - if the user has an existing account , and is an active employee, and, the last changed time in AzAD differs from BambooHR, then 
-                        this first block will compare each of the AzAD User object attributes with the data extracted from BHR and correct them if necessary
-						2. Name Changing situations - If the user has an existing account, but the name does not match with the one from BHR, then, this block will run and 
-                        correct the user Name, UPN,	emailaddress
-						3. If the user is a new employee, and there is no account in AzureAD for him, this script block will create a new user with the data extracted from BHR
+1. Attribute corrections - if the user has an existing account , and is an active employee, and, the last changed time in AzAD differs from BambooHR, then this first block will compare each of the AzAD User object attributes with the data extracted from BHR and correct them if necessary
+2. Name Changing situations - If the user has an existing account, but the name does not match with the one from BHR, then, this block will run and correct the user Name, UPN,	emailaddress
+3. If the user is a new employee, and there is no account in AzureAD for him, this script block will create a new user with the data extracted from BHR
 
 Variables usage description:
 
-$BHR_displayName - The Display Name of the user in BambooHR
-$BHR_lastName - The Last name of the user in BambooHR
-$BHR_firstName - The First Name of the user in BambooHR
-$BHR_lastChanged - The Date when the user's details were last changed in BambooHR
-$BHR_hireDate - The Hire Date of the user set in BambooHR
-$BHR_employeeNumber - The EmployeeID of the user set in BambooHR
-$BHR_jobTitle - The Job Title of the user set in BambooHR
-$BHR_department - The Department of the user set in BambooHR
-$BHR_supervisorEmail - The Manager of the user set in BambooHR
-$BHR_workEmail - The company email address of the user set in BambooHR
-$BHR_EmploymentStatus - The current status of the employee: Active, Terminated and if contains "Suspended" is in "maternity leave"
-$BHR_status - The employee account status in BambooHR: Valid values are "Active" and "Inactive"
+- $BHR_displayName - The Display Name of the user in BambooHR
+- $BHR_lastName - The Last name of the user in BambooHR
+- $BHR_firstName - The First Name of the user in BambooHR
+- $BHR_lastChanged - The Date when the user's details were last changed in BambooHR
+- $BHR_hireDate - The Hire Date of the user set in BambooHR
+- $BHR_employeeNumber - The EmployeeID of the user set in BambooHR
+- $BHR_jobTitle - The Job Title of the user set in BambooHR
+- $BHR_department - The Department of the user set in BambooHR
+- $BHR_supervisorEmail - The Manager of the user set in BambooHR
+- $BHR_workEmail - The company email address of the user set in BambooHR
+- $BHR_EmploymentStatus - The current status of the employee: Active, Terminated and if contains "Suspended" is in "maternity leave"
+- $HR_status - The employee account status in BambooHR: Valid values are "Active" and "Inactive"
 
-
-$azAD_UPN_OBJdetails - All AzAD user object attributes extracted via WorkEmail
-$azAD_EID_OBJdetails - All AzAD user object attributes extracted via EmployeeID
-$azAD_workemail - UserPrincipalName/EmailAddress of the AzureAD user account - string
-$azAD_jobTitle - Job Title of the AzureAd user account - string
-$azAD_department - Department of the AzureAD user account - string
-$azAD_status - Login ability status of the AzureAD user account - boolean -can be True(Account is Active) or False(Account is Disabled)
-$azAD_employeeNumber - Employee Number set on AzureAD user account(assigned by HR upon hire) - string
-$azAD_supervisorEmail - Direct Manager Name set on the AzureAD user account
-$azAD_displayname - The Display Name set on the AzureAD user account - string
-$azAD_firstName - The First Name set on the AzureAD user account - string
-$azAD_lastName - The Last Name set on the AzureAD user account - string
-$azAD_CompanyName - The company Name set on the AzureAD user account - string - Always will be "Tec Software Solutions"
-$azAD_hireDate - The Hire Date set on the AzureAD user account - string
-
+- $azAD_UPN_OBJdetails - All AzAD user object attributes extracted via WorkEmail
+- $azAD_EID_OBJdetails - All AzAD user object attributes extracted via EmployeeID
+- $azAD_workemail - UserPrincipalName/EmailAddress of the AzureAD user account - string
+- $azAD_jobTitle - Job Title of the AzureAd user account - string
+- $azAD_department - Department of the AzureAD user account - string
+- $azAD_status - Login ability status of the AzureAD user account - boolean -can be True(Account is Active) or False(Account is Disabled)
+- $azAD_employeeNumber - Employee Number set on AzureAD user account(assigned by HR upon hire) - string
+- $azAD_supervisorEmail - Direct Manager Name set on the AzureAD user account
+- $azAD_displayname - The Display Name set on the AzureAD user account - string
+- $azAD_firstName - The First Name set on the AzureAD user account - string
+- $azAD_lastName - The Last Name set on the AzureAD user account - string
+- $azAD_CompanyName - The company Name set on the AzureAD user account - string - Always will be "Tec Software Solutions"
+- $azAD_hireDate - The Hire Date set on the AzureAD user account - string
 
 ###This portion describes the major function and logical operations that take place in the script:
 <#
