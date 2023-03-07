@@ -1,118 +1,37 @@
 #Requires -Module ExchangePowerShell,Microsoft.Graph.Users.Actions
 <#
 .SYNOPSIS
+Script to synchronize employee information from BambooHR to Azure Active Directory. It does not support on premises Active Directory.
 
 .DESCRIPTION
-The script will extract the employee data from BambooHR, then, for the data of each user, there are 3 operating blocks, that will run if
-the conditions are fulfilled. The 3 blocks are:
-	1. Attribute corrections - if the user has an existing account , and is an active employee, and, the last changed time in AzAD differs from BambooHR, then this first block will compare each of the AzAD User object attributes with the data extracted from BHR and correct them if necessary
+Extracts employee data from BambooHR and performs one of the following for each user extracted:
+
+	1. Attribute corrections - if the user has an existing account , and is an active employee, and the last changed time in Azure AD differs from BambooHR, then this first block will compare each of the AzAD User object attributes with the data extracted from BHR and correct them if necessary
 	2. Name change - If the user has an existing account, but the name does not match with the one from BHR, then, this block will run and correct the user Name, UPN,	emailaddress
 	3. New employee, and there is no account in AzureAD for him, this script block will create a new user with the data extracted from BHR
 
-.PARAMETER BambooHrApiKey Specify the BambooHR API key
+.PARAMETER BambooHrApiKey
+ Specifies the BambooHR API key
 
-.PARAMETER AdminEmailAddress Specify the email address to receive notifications
+.PARAMETER AdminEmailAddress 
+Specifies the email address to receive notifications
 
-.PARAMETER CompanyName Specify the BambooHR company name used in the URL
+.PARAMETER CompanyName 
+Specifies the BambooHR company name used in the URL
 
-.PARAMETER TenantID Specify the Microsoft tenant name (company.onmicrosoft.com)
+.PARAMETER TenantID 
+Specifies the Microsoft tenant name (company.onmicrosoft.com)
 
-.PARAMETER AADCertificateThumbprint Specify the certificate thumbprint for the Azure AD client application.
+.PARAMETER AADCertificateThumbprint 
+Specifies the certificate thumbprint for the Azure AD client application.
 
-.PARAMETER AzureClientAppId Specify the Azure AD client application id
+.PARAMETER AzureClientAppId 
+Specifies the Azure AD client application id
 
-$BHR_displayName - The Display Name of the user in BambooHR
-$BHR_lastName - The Last name of the user in BambooHR
-$BHR_firstName - The First Name of the user in BambooHR
-$BHR_lastChanged - The Date when the user's details were last changed in BambooHR
-$BHR_hireDate - The Hire Date of the user set in BambooHR
-$BHR_employeeNumber - The EmployeeID of the user set in BambooHR
-$BHR_jobTitle - The Job Title of the user set in BambooHR
-$BHR_department - The Department of the user set in BambooHR
-$BHR_supervisorEmail - The Manager of the user set in BambooHR
-$BHR_workEmail - The company email address of the user set in BambooHR
-$BHR_EmploymentStatus - The current status of the employee: Active, Terminated and if contains "Suspended" is in "maternity leave"
-$BHR_status - The employee account status in BambooHR: Valid values are "Active" and "Inactive"
-
-$azAD_UPN_OBJdetails - All AzAD user object attributes extracted via WorkEmail
-$azAD_EID_OBJdetails - All AzAD user object attributes extracted via EmployeeID
-$azAD_workemail - UserPrincipalName/EmailAddress of the AzureAD user account - string
-$azAD_jobTitle - Job Title of the AzureAd user account - string
-$azAD_department - Department of the AzureAD user account - string
-$azAD_status - Login ability status of the AzureAD user account - boolean -can be True(Account is Active) or False(Account is Disabled)
-$azAD_employeeNumber - Employee Number set on AzureAD user account(assigned by HR upon hire) - string
-$azAD_supervisorEmail - Direct Manager Name set on the AzureAD user account
-$azAD_displayname - The Display Name set on the AzureAD user account - string
-$azAD_firstName - The First Name set on the AzureAD user account - string
-$azAD_lastName - The Last Name set on the AzureAD user account - string
-$azAD_CompanyName - The company Name set on the AzureAD user account - string - Always will be "Company Name"
-$azAD_hireDate - The Hire Date set on the AzureAD user account - string
-
-
-Operations in this script:
-	
-Extract Employee Data from BambooHR
-	If BHR employee data extraction = successful -> Save data to $employees and clear the $Response variable to save memory -> Continue
-	If BHR employee data extraction = Failed -> Send email alert, save error info to log file and terminate script
-
-Connect to Azure AD via graph PowerShell module
-	If connection successful -> Continue
-    If connection fails -> Send alert + terminate script
-	
-$employees - system.array custom object containing an array of "user attributes" in blocks(arrays). Each block(array) represents 1 user and 
-their details: Firstname,Lastname,email address, etc. The script cycles throug each block, and performs operations for each user attributes 
-within the particular block of data. FOR EACH block of data within the variable $employees, representing 1 user with all its attributes, perform the below operations. There are 3 major
-script blocks: 1. User attribute correction, 2. User attribute correction for name changing situations, 3. User account creation
-
-For each employee returned from BambooHR:
-
-    Save the data of each attribute to a variable, to be used in comparison operations with the user attibutes in AzAD.
-    
-    GET user attributes from AzAD via UPN (UserPrincipalName, aka workmail in BHR).
-    GET user attributes from AzAD via EmployeeID.
-    The 2 GET operations are performed, in order to: verify if the user account exists in AzAD, to verify and match each of the user attributes between
-    AzAD and BHR and to verify IF the name of the user has been changed (hence, the GET based on the EmployeeID).
-    
-    IF (EmployeeID of the account interrogated based on UPN(workmail) matches the EmployeeID extracted via BHR EmployeeID
-    AND IF the UPN via workmail matches the UPN via EmployeeID and matches workmail
-    AND IF objID extracted via UPN matches objID extracted via EmployeeID
-    AND IF LastChanged in BHR match LastChanged on ExtensionAttribute1
-    AND IF ObjectDetails extracted via EmployeeID IS not empty (the command to get the user object found an existing object with that EmployeeID)
-    AND IF ObjectDetails extracted via UPN IS not empty (the command to get the user object found an existing object with that UPN)
-    AND IF The Employee is not in suspended state (Suspended state is reserved for maternity leave) )
-                THEN(Run the attibutes correction block){
-                    Save each AzAD attributes of the user object to be compared one by one with the details pulled from BambooHR
-                    Compare Job Title -> adjust in AzAD if different from BHR
-                    Compare Department -> adjust in AzAD if different from BHR
-                    Compare Manager -> adjust in AzAD if different from BHR
-                    Compare HireDate -> adjust in AzAD if different from BHR
-                    Compare Active status-> adjust in AzAD if different from BHR -> IF employee left the company (Inactive in BHR) -> Remove auth methods, change pass, 
-                                                                                    deactivate AzAD account
-                                                                                    -> IF active in BHR but disabled in AzAD -> Activate AzAD account
-                    Compare EmployeeID -> adjust in AzAD if different from BHR
-                    Compare Company Name -> adjust in AzAD if different from BHR
-                    Compare Last Changed -> adjust in AzAD (ExtensionAttribute1) if different from BHR}
-                                                        
-                                                        
-    If (ObjID extracted via UPN not match ObjID extracted via EmployeeID and IF status in BHR not like "Suspended")
-                THEN(Run the name correction block){
-                    Save Object Attributes extracted via EmployeeID to variables, to be compared with BHR attributes
-                    Compare LastModified -> Set LastModified from BambooHR to ExtensionAttribute1 in AzAD
-                    Compare LastName -> Change last name in Azure
-                    Compare Firstname -> Change FirstName in AzureAD
-                    Compare Display Name -> Set Display Name in AzureAD
-                    Compare EmailAddress -> Set EmailAddress in AzureAD
-                    Compare UPN -> Set UPN In AzureAD -> Send email to user and admin informing on the change}
-                                                    
-    If (the get-mguser command did not return any valid object (Both via UPN and EmployeeID) )
-                THEN(Trigger the account creation block){
-                    Create Password
-                    Create account using New-MgUser command with the employee details saved in the variables at the begining of the "Foreach" block"
-                    IF -> account Creation successfull -> Sent the account details (login and pass) via email to admin
-                        -> account Creation failed -> Send email to admin with the error details informing on the failure}
-	}
-
+.NOTES
+More documentation available in project README
 #>
+
 [CmdletBinding()]
 param (
     [Parameter()]
@@ -278,7 +197,7 @@ $runtime = Measure-Command -Expression {
         $BHR_api_call_err_category = $BHR_api_call_err.CategoryInfo.Category
         $BHR_api_call_err_stack = $BHR_api_call_err.ScriptStackTrace
         
-        Write-log -Message "API call to return user information from BambooHR has failed. Script terminated at line 225. Following are the error details. `
+        Write-log -Message "API call to return user information from BambooHR has failed. Script terminated. Following are the error details. `
 EXCEPTION MESSAGE: `
 $BHR_api_call_err_message `
 CATEGORY: `
@@ -321,7 +240,7 @@ Automated User Account Management"
     }
 
     # If no error returned, it means that the script was not interrupted by the "Exit" command within the "Catch" block. Write info below to log file and continue
-    Write-Log -Message "Successfully extracted employee information from BambooHR. Line 168 'Try' did not generate errors" -Severity Information
+    Write-Log -Message "Successfully extracted employee information from BambooHR. 'Try' did not generate errors" -Severity Information
   
     # Saving only the employee data to $employees variable and eliminate $response variable to save memory
     $employees = $response.employees
@@ -334,7 +253,7 @@ Automated User Account Management"
 
     if ($?) {
         # If no error returned, write to log file and continue
-        Write-Log -Message "Successfully connected to $TenantId. Command at line 281 did not generate errors." -Severity Information
+        Write-Log -Message "Successfully connected to $TenantId. Command did not generate errors." -Severity Information
     }
     else {
 
@@ -344,7 +263,7 @@ Automated User Account Management"
         $mgerr_category = $mgconnerror.CategoryInfo
         $mgerr_errID = $mgconnerror.FullyQualifiedErrorId
         $mgerr_stack = $mgconnerror.ScriptStackTrace
-        Write-Log -Message "Connection to tenant has failed. Script terminated at line 299. Below are the error details.`
+        Write-Log -Message "Connection to tenant has failed. Script terminated. Below are the error details.`
 EXCEPTION: `
 $mgerr_exception `
 CATEGORY: `
@@ -392,19 +311,26 @@ Automated User Account Management"
         Exit
     }
         
-    Write-Log -Message "Entering Foreach loop to check the attributes of each user at a time. Foreach loop initiated at line 345" -Severity Information
+    Write-Log -Message "Entering Foreach loop to check the attributes of each user at a time. Foreach loop initiated." -Severity Information
     
     $employees | ForEach-Object {
         $error.Clear()
 
         # On each loop, pass all employee data from BambooHR to variables, to be compared one by one with the user data from Azure AD and set them, if necessary
         $BHR_lastChanged = $_.lastChanged
+        # Hire date as listed in Bamboo HR
         $BHR_hireDate = $_.hireDate
+        # Employee number as listed in Bamboo HR
         $BHR_employeeNumber = $_.employeeNumber
+        # Job title as listed in Bamboo HR
         $BHR_jobTitle = $_.jobTitle
+        # Department as listed in Bamboo HR
         $BHR_department = $_.department
+        # Supervisor email address as listed in Bamboo HR
         $BHR_supervisorEmail = $_.supervisorEmail
+        # Work email address as listedin Bamboo HR
         $BHR_workEmail = $_.workEmail
+        # Current status of the employee: Active, Terminated and if contains "Suspended" is in "maternity leave"
         $BHR_EmploymentStatus = $_.employmentHistoryStatus
         # Translating user "status" from BambooHR to boolean, to match and compare with the AzureAD user account status
         $BHR_status = $_.status
@@ -414,13 +340,16 @@ Automated User Account Management"
         { $BHR_AccountEnabled = $True }
 
         # Normalizing user names, eliminating language specific characters
+        # Last name of employee in Bamboo HR
         $BHR_firstName = $_.firstName -creplace "Ă", "A" -creplace "ă", "a" -creplace "â", "a" -creplace "Â", "A" -creplace "Î", "I" -creplace "î", "i" -creplace "Ș", "S" -creplace "ș", "s" -creplace "Ț", "T" -creplace "ț", "t"
+        # First name of employee in Bamboo HR
         $BHR_lastName = $_.lastName -creplace "Ă", "A" -creplace "ă", "a" -creplace "â", "a" -creplace "Â", "A" -creplace "Î", "I" -creplace "î", "i" -creplace "Ș", "S" -creplace "ș", "s" -creplace "Ț", "T" -creplace "ț", "t"
+        # The Display Name of the user in BambooHR
         $BHR_displayName = $_.displayName -creplace "Ă", "A" -creplace "ă", "a" -creplace "â", "a" -creplace "Â", "A" -creplace "Î", "I" -creplace "î", "i" -creplace "Ș", "S" -creplace "ș", "s" -creplace "Ț", "T" -creplace "ț", "t"
         $BHR_firstName = (get-culture).textinfo.ToTitleCase($BHR_firstName)
         $BHR_lastName = (get-culture).textinfo.ToTitleCase($BHR_lastName)
         $BHR_displayName = (get-culture).textinfo.ToTitleCase($BHR_displayName)
-        Write-Log -Message "Eliminated language specific characters from names and capitalize first letters. Lines 324-329." -Severity Information
+        Write-Log -Message "Eliminated language specific characters from names and capitalize first letters." -Severity Information
 
         Write-Log -Message "Verifying employee with the following details in BambooHR:
 Firstname: $BHR_firstName
@@ -450,7 +379,7 @@ Employee Status: $BHR_status" -Severity Information
             $azAD_EID_OBJdetails = $null
 
             # Check if the user exists in AzAD and If there is an account with the EmployeeID of the user checked in the current loop
-            Write-Log -Message "Checking if $BHR_workEmail has a valid and matching AzureAD account. At lines 363-364." -Severity Information
+            Write-Log -Message "Checking if $BHR_workEmail has a valid and matching AzureAD account." -Severity Information
             Get-MgUser -UserId $BHR_workEmail -OutVariable azAD_UPN_OBJdetails -Property id, userprincipalname, Department, EmployeeID, JobTitle, CompanyName, Surname, GivenName, DisplayName, AccountEnabled, Mail, EmployeeHireDate, OnPremisesExtensionAttributes -ExpandProperty manager
             Get-MgUser -Filter "employeeID eq '$BHR_employeenumber'" -OutVariable azAD_EID_OBJdetails -Property employeeid, userprincipalname, Department, JobTitle, CompanyName, Surname, GivenName, DisplayName, AccountEnabled, Mail, EmployeeHireDate, OnPremisesExtensionAttributes  -ExpandProperty manager
             $error.clear()
@@ -469,7 +398,7 @@ Employee Status: $BHR_status" -Severity Information
                     $azAD_EID_OBJdetails.Capacity -ne 0 -and `
                     $azAD_UPN_OBJdetails.Capacity -ne 0 -and `
                     $BHR_EmploymentStatus -notlike "*suspended*") { 
-                Write-Log  -Message "$BHR_workEmail is a valid AzureAD Account, with matching EmployeeID and UPN from AzureAD to BambooHR, but different last modified date. IF statement passed as true, at line 373." -Severity Warning
+                Write-Log  -Message "$BHR_workEmail is a valid AzureAD Account, with matching EmployeeID and UPN from AzureAD to BambooHR, but different last modified date. If statement passed as true." -Severity Warning
                 #saving AzAD attributes to be compared one by one with the details pulled from BambooHR
                 $azAD_workemail = $azAD_UPN_OBJdetails.Mail
                 $azAD_jobTitle = $azAD_UPN_OBJdetails.JobTitle
@@ -506,7 +435,7 @@ Employee Status: $BHR_status" -Severity Information
                         $err_details = $error.ErrorDetails
                         $err_trace = $error.ScriptStackTrace
 
-                        Write-Log -Message "Could not change the JobTitle of $BHR_workEmail. Command on line 411 returned error. Details below. `
+                        Write-Log -Message "Could not change the JobTitle of $BHR_workEmail. Command returned error. Details below. `
                                 Exception: `
                                 $err_msg `
                                 Target object: `
@@ -520,7 +449,7 @@ Employee Status: $BHR_status" -Severity Information
                     else {
                         $error.Clear()
                         Write-Log -Message "JobTitle for $BHR_workEmail in AzureAD:$azAD_jobTitle and in BambooHR:$BHR_jobTitle.
-Set the JobTitle found on BambooHR to the Azure User Object. IF condition result is True at line 408" -Severity Warning
+Set the JobTitle found on BambooHR to the Azure User Object. IF condition result is True" -Severity Warning
                     }
                 }
         
@@ -534,7 +463,7 @@ Set the JobTitle found on BambooHR to the Azure User Object. IF condition result
                         $err_details = $error.ErrorDetails
                         $err_trace = $error.ScriptStackTrace
 
-                        Write-Log -Message "Could not change the Department of $BHR_workEmail. Command on line 442 returned error. Details below. `
+                        Write-Log -Message "Could not change the Department of $BHR_workEmail. Command returned error. Details below. `
                                 Exception: `
                                 $err_msg `
                                 Target object: `
@@ -548,7 +477,7 @@ Set the JobTitle found on BambooHR to the Azure User Object. IF condition result
                     else {
                         $error.Clear()
                         Write-Log -Message "Department for $BHR_workEmail in AzureAD:$azAD_department and in BambooHR:$BHR_department. `
-Setting the Department found on BambooHR to the Azure User Object. IF condition result is True at line 439" -Severity Information
+Setting the Department found on BambooHR to the Azure User Object. IF condition result is True" -Severity Information
                     }
                 }
         
@@ -566,7 +495,7 @@ Setting the Department found on BambooHR to the Azure User Object. IF condition 
                         $err_details = $error.ErrorDetails
                         $err_trace = $error.ScriptStackTrace
 
-                        Write-Log -Message "Could not change the Manager of $BHR_workEmail. Command on line 477 returnet error. Details below. `
+                        Write-Log -Message "Could not change the Manager of $BHR_workEmail. Command returned error. Details below. `
                                 Exception: `
                                 $err_msg `
                                 Target object: `
@@ -580,7 +509,7 @@ Setting the Department found on BambooHR to the Azure User Object. IF condition 
                     else {
                         $error.Clear()
                         Write-Log -Message "Manager of $BHR_workEmail in AzureAD:$azAD_supervisorEmail and in BambooHR:$BHR_supervisorEmail. `
-Setting the Manager found on BambooHR to the Azure User Object. IF condition result is True at line 470" -Severity Warning
+Setting the Manager found on BambooHR to the Azure User Object. IF condition result is True" -Severity Warning
                     }
                 }
             
@@ -594,7 +523,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         $err_details = $error.ErrorDetails
                         $err_trace = $error.ScriptStackTrace
 
-                        Write-Log -Message "Could not change the Employee Hire Date. Command on line 508 returnet error. Details below. `
+                        Write-Log -Message "Could not change the Employee Hire Date. Command returnet error. Details below. `
                                 Exception: `
                                 $err_msg `
                                 Target object: `
@@ -607,7 +536,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                     }
                     else {
                         $error.Clear()
-                        Write-Log -Message "Setting the Hire date of $BHR_workEmail to $BHR_hireDate. IF condition result is True at line 505" -Severity Warning
+                        Write-Log -Message "Setting the Hire date of $BHR_workEmail to $BHR_hireDate. IF condition result is True" -Severity Warning
                     }
                 }
 
@@ -644,9 +573,9 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                     $error.Clear() 
                     for ($i = 0 ; $i -lt $methods_count ; $i++) {
        
-                        if ((($methodsdata[$i]).Values) -like "*phoneAuthenticationMethod*") { Remove-MgUserAuthenticationPhoneMethod -UserId $BHR_workEmail -PhoneAuthenticationMethodId ($methodID[$i]).id; Write-Log -Message "Removed phone auth method for $BHR_workEmail. Line 568." -Severity Warning }
-                        if ((($methodsdata[$i]).Values) -like "*microsoftAuthenticatorAuthenticationMethod*") { Remove-MgUserAuthenticationMicrosoftAuthenticatorMethod -UserId $BHR_workEmail -MicrosoftAuthenticatorAuthenticationMethodId ($methodID[$i]).id; Write-Log -Message "Removed auth app method for $BHR_workEmail. Line 569." -Severity Warning }
-                        if ((($methodsdata[$i]).Values) -like "*windowsHelloForBusinessAuthenticationMethod*") { Remove-MgUserAuthenticationFido2Method -UserId $BHR_workEmail -Fido2AuthenticationMethodId ($methodID[$i]).id ; Write-Log -Message "Removed PIN auth method for $BHR_workEmail. Line 570." -Severity Warning }
+                        if ((($methodsdata[$i]).Values) -like "*phoneAuthenticationMethod*") { Remove-MgUserAuthenticationPhoneMethod -UserId $BHR_workEmail -PhoneAuthenticationMethodId ($methodID[$i]).id; Write-Log -Message "Removed phone auth method for $BHR_workEmail." -Severity Warning }
+                        if ((($methodsdata[$i]).Values) -like "*microsoftAuthenticatorAuthenticationMethod*") { Remove-MgUserAuthenticationMicrosoftAuthenticatorMethod -UserId $BHR_workEmail -MicrosoftAuthenticatorAuthenticationMethodId ($methodID[$i]).id; Write-Log -Message "Removed auth app method for $BHR_workEmail." -Severity Warning }
+                        if ((($methodsdata[$i]).Values) -like "*windowsHelloForBusinessAuthenticationMethod*") { Remove-MgUserAuthenticationFido2Method -UserId $BHR_workEmail -Fido2AuthenticationMethodId ($methodID[$i]).id ; Write-Log -Message "Removed PIN auth method for $BHR_workEmail." -Severity Warning }
                     }
                     Update-MgUser -EmployeeId "LVR" -UserId $BHR_workEmail                                            
                     if ($error.Count -ne 0) {
@@ -664,7 +593,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         }
                     }
                     else {
-                        Write-Log -Message "Account $BHR_workEmail marked as inactive in BambooHR but found active in Azure AD. Disabled AzAD account, revoked sessions and removing auth methods. IF condition result is True at line 536" -Severity Warning              
+                        Write-Log -Message "Account $BHR_workEmail marked as inactive in BambooHR but found active in Azure AD. Disabled AzAD account, revoked sessions and removing auth methods. IF condition result is True" -Severity Warning              
                         $error.Clear()
                     }
 
@@ -680,7 +609,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         $err_details = $error.ErrorDetails
                         $err_trace = $error.ScriptStackTrace
 
-                        Write-Log -Message "Could not activate the User Account at line 601. Details below. `
+                        Write-Log -Message "Could not activate the user account. Details below. `
                                 Exception: `
                                 $err_msg `
                                 Target object: `
@@ -692,7 +621,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         $error.Clear()
                     }
                     else {
-                        Write-Log -Message "Account $BHR_workEmail marked as Active in BambooHR but found Inactive in AzAD. Enabled AzAD account for sign-in. IF condition result is True at line 597." -Severity Warning
+                        Write-Log -Message "Account $BHR_workEmail marked as Active in BambooHR but found Inactive in AzAD. Enabled AzAD account for sign-in. IF condition result is True." -Severity Warning
                         $error.Clear()
                     }                   
                 }
@@ -707,7 +636,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         $err_details = $error.ErrorDetails
                         $err_trace = $error.ScriptStackTrace
 
-                        Write-Log -Message "Could not change the EmployeeID. Error on command at line 631. Details below. `
+                        Write-Log -Message "Could not change the EmployeeID. Error on command. Details below. `
                                 Exception: `
                                 $err_msg `
                                 Target object: `
@@ -719,7 +648,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         $error.Clear()
                     }
                     else {
-                        Write-Log -Message "The ID $BHR_employeeNumber has been set to $BHR_workEmail AzAD account. IF condition result is True at line 628." -Severity Warning
+                        Write-Log -Message "The ID $BHR_employeeNumber has been set to $BHR_workEmail AzAD account. IF condition result is True." -Severity Warning
                         $error.Clear()
                     }
                 }
@@ -735,7 +664,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         $err_details = $error.ErrorDetails
                         $err_trace = $error.ScriptStackTrace
 
-                        Write-Log -Message "Could not change the Company Name of $BHR_workEmail. Error on line 662. Details below. `
+                        Write-Log -Message "Could not change the Company Name of $BHR_workEmail. Error details below. `
                                 Exception: `
                                 $err_msg `
                                 Target object: `
@@ -747,7 +676,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         $error.Clear()
                     }
                     else {
-                        Write-Log -Message "The $BHR_workEmail employee Company attribute has been set to: Company Name. IF condition result is True at line 658." -Severity Warning
+                        Write-Log -Message "The $BHR_workEmail employee Company attribute has been set to: Company Name. IF condition result is True." -Severity Warning
                     }
                 }
 
@@ -762,7 +691,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         $err_details = $error.ErrorDetails
                         $err_trace = $error.ScriptStackTrace
 
-                        Write-Log -Message "Could not change the ExtensionAttribute1. Error on line 692. Details below. `
+                        Write-Log -Message "Could not change the ExtensionAttribute1. Error details below. `
                                 Exception: `
                                 $err_msg `
                                 Target object: `
@@ -774,7 +703,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         $error.Clear()
                     }
                     else {
-                        Write-Log -Message "The $BHR_workEmail employee LastChanged attribute set to extensionAttribute1 as $BHR_lastChanged. On line 688." -Severity Warning
+                        Write-Log -Message "The $BHR_workEmail employee LastChanged attribute set to extensionAttribute1 as $BHR_lastChanged." -Severity Warning
                     }
                 }
 
@@ -793,7 +722,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                 $azAD_firstName = $azAD_EID_OBJdetails.GivenName
                 $azAD_lastName = $azAD_EID_OBJdetails.Surname
 
-                Write-Log -Message "Initiated name changing procedure at line 721 for AzAD user object found with the following attributes:
+                Write-Log -Message "Initiated name changing procedure for AzAD user object found with the following attributes:
     Firstname: $azAD_firstName
     Lastname: $azAD_lastName
     Display Name: $azAD_displayname
@@ -805,7 +734,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                 # Set LastModified from BambooHR to ExtensionAttribute1 in AzAD
                 if ($EID_ExtensionAttribute1 -ne $BHR_lastChanged) {
                     # Setting the "lastchanged" attribute from BambooHR to ExtensionAttribute1 in AzAD
-                    Write-Log -Message "The $BHR_workEmail employee LastChanged attribute set to extensionAttribute1 as $BHR_lastChanged. IF at line 744 returned TRUE." -Severity Information
+                    Write-Log -Message "The $BHR_workEmail employee LastChanged attribute set to extensionAttribute1 as $BHR_lastChanged. If returned True." -Severity Information
                     Update-MgUser -OnPremisesExtensionAttributes @{extensionAttribute1 = $BHR_lastChanged } -UserId $azAD_ObjectID
                         
                     if (!$?) {
@@ -814,7 +743,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         $err_details = $error.ErrorDetails
                         $err_trace = $error.ScriptStackTrace
 
-                        Write-Log -Message "Could not change the ExtensionAttribute1. Error on command at line 748. Details below. `
+                        Write-Log -Message "Could not change the ExtensionAttribute1. Error on command. Details below. `
                                 Exception: `
                                 $err_msg `
                                 Target object: `
@@ -826,13 +755,13 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         $error.Clear()
                     }
                     else {
-                        Write-Log -Message "ExtensionAttribute1 changed to: $BHR_lastChanged for employee $BHR_workEmail. On line 748." -Severity Warning
+                        Write-Log -Message "ExtensionAttribute1 changed to: $BHR_lastChanged for employee $BHR_workEmail." -Severity Warning
                     }
                 }
                 # Change last name in Azure
             
                 if ($azAD_lastName -ne $BHR_lastName) {
-                    Write-Log -Message "Changing the last name of $BHR_workEmail from $azAD_lastName to $BHR_lastName. IF condition returned true on line 775." -Severity Information
+                    Write-Log -Message "Changing the last name of $BHR_workEmail from $azAD_lastName to $BHR_lastName. IF condition returned true." -Severity Information
                     Update-MgUser -UserId $azAD_ObjectID -Surname $BHR_lastName
                         
                     if (!$?) {
@@ -841,7 +770,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         $err_details = $error.ErrorDetails
                         $err_trace = $error.ScriptStackTrace
                                
-                        Write-Log -Message "Could not change the Last Name. Error on line 778. Details below. `
+                        Write-Log -Message "Could not change the Last Name. Error details below. `
                                 Exception: `
                                 $err_msg `
                                 Target object: `
@@ -853,7 +782,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         $error.Clear()
                     }
                     else {
-                        Write-Log -Message "Successfully changed the last name of $BHR_workEmail from $azAD_lastName to $BHR_lastName on line 775." -Severity Warning
+                        Write-Log -Message "Successfully changed the last name of $BHR_workEmail from $azAD_lastName to $BHR_lastName." -Severity Warning
                     }
                 }
             
@@ -866,7 +795,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         $err_details = $error.ErrorDetails
                         $err_trace = $error.ScriptStackTrace
                              
-                        Write-Log -Message "Could not change the First Name of $azAD_ObjectID. Error on line 807. Details below. `
+                        Write-Log -Message "Could not change the First Name of $azAD_ObjectID. Error details below. `
                                 Exception: `
                                 $err_msg `
                                 Target object: `
@@ -878,7 +807,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         $error.Clear()
                     }#Change First Name error logging     
                     else {
-                        Write-Log -Message "Successfully changed the first name of user with objID: $azAD_ObjectID. On line 807." -Severity Warning
+                        Write-Log -Message "Successfully changed the first name of user with objID: $azAD_ObjectID." -Severity Warning
                     }       
                 }# Change first name script block closure
            
@@ -892,7 +821,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         $err_details = $error.ErrorDetails
                         $err_trace = $error.ScriptStackTrace
                              
-                        Write-Log -Message "Could not change the Display Name. Error on line 835. Details below. `
+                        Write-Log -Message "Could not change the Display Name. Error details below. `
                                 Exception: `
                                 $err_msg `
                                 Target object: `
@@ -904,7 +833,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         $error.Clear()
                     }# Change display name - Error logging
                     else {
-                        Write-Log "The current Display Name: $azAD_displayname of $azAD_ObjectID has been changed to $BHR_displayName. If condition true on line 833." -Severity Warning
+                        Write-Log "The current Display Name: $azAD_displayname of $azAD_ObjectID has been changed to $BHR_displayName. If condition true." -Severity Warning
                     }        
                 }
                 # Change Display Name script block closure
@@ -919,7 +848,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         $err_details = $error.ErrorDetails
                         $err_trace = $error.ScriptStackTrace
                              
-                        Write-Log -Message "Could not change the Email Address. Error on line 864. Details below. `
+                        Write-Log -Message "Could not change the Email Address. Error details below. `
                                 Exception: `
                                 $err_msg `
                                 Target object: `
@@ -932,7 +861,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                     }
                     else {
                         # Change Email Address error logging
-                        Write-Log "The current Email Address: $azAD_workemail of $azAD_ObjectID has been changed to $BHR_workEmail. If condition true on line 862." -Severity Warning
+                        Write-Log "The current Email Address: $azAD_workemail of $azAD_ObjectID has been changed to $BHR_workEmail. If condition true." -Severity Warning
                     }             
                 }
 
@@ -947,7 +876,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         $err_details = $error.ErrorDetails
                         $err_trace = $error.ScriptStackTrace
                              
-                        Write-Log -Message "Could not change the UPN for $azAD_ObjectID. Error on line 893. Details below. `
+                        Write-Log -Message "Could not change the UPN for $azAD_ObjectID. Error details below. `
                                 Exception: `
                                 $err_msg `
                                 Target object: `
@@ -959,7 +888,7 @@ Setting the Manager found on BambooHR to the Azure User Object. IF condition res
                         $error.Clear()
                     } 
                     else {
-                        Write-Log -Message "Changed the current UPN:$azAD_UPN of $azAD_ObjectID to $BHR_workEmail. IF Condition true on line 893." -Severity Warning
+                        Write-Log -Message "Changed the current UPN:$azAD_UPN of $azAD_ObjectID to $BHR_workEmail. IF Condition true." -Severity Warning
                         $params = @{
                             Message         = @{
                                 Subject      = "Login details change for $BHR_displayName"
@@ -1067,7 +996,7 @@ Automated User Account Management Service"
 
                 }
                 else {
-                    # IF "User account creation succeded" closure
+                    # If "User account creation succeded" closure
                     $creationerror = $error
                     $full_Error_Details = $creationerror | Select-Object *
                     $creationerror_exception = $creationerror.Exception.Message
@@ -1075,7 +1004,7 @@ Automated User Account Management Service"
                     $creationerror_errID = $creationerror.FullyQualifiedErrorId
                     $creationerror_stack = $creationerror.ScriptStackTrace    
 
-                    Write-Log -Message "Account $BHR_workEmail creation failed. New-Mguser cmdlet at line 955 returned error. Full error details: `
+                    Write-Log -Message "Account $BHR_workEmail creation failed. New-Mguser cmdlet returned error. Full error details: `
 $full_Error_Details" `
                         -Severity Error
 
