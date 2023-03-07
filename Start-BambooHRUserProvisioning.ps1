@@ -8,7 +8,7 @@ the conditions are fulfilled. The 3 blocks are:
 						3. If the user is a new employee, and there is no account in AzureAD for him, this script block will create a new user with the data extracted from BHR
 
 Variables usage description:
-
+.PARAMETER 
 $BHR_displayName - The Display Name of the user in BambooHR
 $BHR_lastName - The Last name of the user in BambooHR
 $BHR_firstName - The First Name of the user in BambooHR
@@ -112,9 +112,7 @@ $employees|FOR EACH
 $runtime=Measure-Command -Expression {
 #####################################Provision users to AzureAD using the employee details from BambooHR#######################################
 
-
-
-#####ERROR LOGGING FUNCTION#####
+# ERROR LOGGING FUNCTION
 $log_filename="Log_"+(get-date -Format yyyy-MM-dd_HH-MM-s)+".csv"
 $log_file="C:\Reports\automation\$log_filename"
 function Write-Log {
@@ -137,8 +135,7 @@ function Write-Log {
     } | Export-Csv -Path $log_file -Append -NoTypeInformation
  }#####ERROR LOGGING FUNCTION BLOCK CLOSURE##### 
 
-
-#####PASSWORD GENERATOR FUNCTION#####
+# PASSWORD GENERATOR FUNCTION
 function Get-RandomPassword {
     param (
         [Parameter(Mandatory)]
@@ -157,10 +154,9 @@ function Get-RandomPassword {
                                          }
  
     return (-join $result)
-}#####PASSWORD GENERATOR FUNCTION BLOCK CLOSURE#####
+}
 
-
-#Getting all users details from BambooHR and passing the extracted info to the variable $employees
+# Getting all users details from BambooHR and passing the extracted info to the variable $employees
 $headers=@{}
 $headers.Add("Content-Type", "application/json")
 $headers.Add("Authorization", "asd APIKEYHERE")
@@ -176,7 +172,7 @@ Invoke-RestMethod `
 
 } 
 Catch {
-    #If error returned, the API call to BambooHR failed and no usable employee data has been returned, write to log file and exit script
+    # If error returned, the API call to BambooHR failed and no usable employee data has been returned, write to log file and exit script
         
         $BHR_api_call_err=$_
         $BHR_api_call_err_message=$BHR_api_call_err.Exception.Message
@@ -223,12 +219,11 @@ Automated User Account Management Service"
                     Send-MgUserMail -BodyParameter $params -UserId Impersonated_Mailbox@domain.com
 
         Exit
-    }#INVOKE-RESTMETHOD CATCH ERROR BLOCK CLOSURE 
+    }
 
         #If no error returned, it means that the script was not interrupted by the "Exit" command within the "Catch" block. Write info below to log file and continue
         Write-Log -Message "Successfully extracted the employees information from BambooHR. Line 168 'Try' did not generate errors" -Severity Information
   
-
         #Saving only the employee data to $employees variable and eliminate $response variable to save memory
         $employees=$response.employees
         Remove-Variable -Name response
@@ -304,7 +299,7 @@ Automated User Account Management Service"
     $employees|ForEach-Object{
     $error.Clear()
 
-#####On each loop, pass all employee data from BambooHR to variables, to be compared one by one with the user data from AzAD and set them, if necessary
+# On each loop, pass all employee data from BambooHR to variables, to be compared one by one with the user data from AzAD and set them, if necessary
 $BHR_lastChanged=$_.lastChanged
 $BHR_hireDate=$_.hireDate
 $BHR_employeeNumber=$_.employeeNumber
@@ -320,7 +315,7 @@ $BHR_status=$_.status
     if($BHR_status -eq "Active")
         {$BHR_AccountEnabled=$True}
 
-    #Normalizing user names, eliminating language specific characters
+    # Normalizing user names, eliminating language specific characters
 $BHR_firstName=$_.firstName -creplace "Ă","A" -creplace "ă","a" -creplace "â","a" -creplace "Â","A" -creplace "Î","I" -creplace "î","i" -creplace "Ș","S" -creplace "ș","s" -creplace "Ț","T" -creplace "ț","t"
 $BHR_lastName=$_.lastName -creplace "Ă","A" -creplace "ă","a" -creplace "â","a" -creplace "Â","A" -creplace "Î","I" -creplace "î","i" -creplace "Ș","S" -creplace "ș","s" -creplace "Ț","T" -creplace "ț","t"
 $BHR_displayName=$_.displayName -creplace "Ă","A" -creplace "ă","a" -creplace "â","a" -creplace "Â","A" -creplace "Î","I" -creplace "î","i" -creplace "Ș","S" -creplace "ș","s" -creplace "Ț","T" -creplace "ț","t"
@@ -349,7 +344,7 @@ or correct the attributes in AzureAD for the employee, else, the employee found 
 
 
 $current_date=(get-date)
-if((([datetime]$BHR_hireDate).AddDays(-14)) -lt $current_date)
+if ((([datetime]$BHR_hireDate).AddDays(-14)) -lt $current_date)
 {
 
 $error.clear()
