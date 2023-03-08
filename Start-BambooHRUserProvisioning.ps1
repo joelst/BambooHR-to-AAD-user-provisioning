@@ -54,7 +54,7 @@ param (
     $AzureClientAppId
 )
 
-# Check if variables are blank and if there is a environment variable that should be applied for being used as an Azure Function
+# Check if variables are not set. If there is an environment variable, set its value to the variable. Used as an Azure Function
 if ([string]::IsNullOrWhiteSpace($BambooHrApiKey) -and [string]::IsNullOrWhiteSpace($env:BambooHrApiKey)) {
    Write-Log "BambooHR API Key not defined" -Severity Error
    exit
