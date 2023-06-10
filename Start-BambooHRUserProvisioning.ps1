@@ -1,7 +1,7 @@
 #Requires -Module ExchangeOnlineManagement,Microsoft.Graph
 <#
 
-IMPORTANT: This is a sample solution and should be used by those comfortable testing and retesting and validating before thinking about using it in production. 
+IMPORTANT: This is a sample solution and should be used by those comfortable testing and retesting and validating before using it in production. 
 All content is provided AS IS with no guarantees or assumptions of quality of functionality. 
 
 If you are using employee information there is much that can go wrong! 
@@ -50,6 +50,9 @@ Location to save logs
 A two letter country code (ISO standard 3166) to set AAD usage location. 
 Required for users that will be assigned licenses due to legal requirement to check for availability of services in countries. Examples include: US, JP, and GB.
 
+.PARAMETER DaysAhead
+Number of days to look ahead for the employee to start.
+
 .PARAMETER TestOnly
 Specify when you do not want to make any changes.
 
@@ -76,16 +79,19 @@ param (
     $BHRCompanyName,
     [Parameter()]
     [string]
-    $CompanyName,
+    $CompanyName ,
     [Parameter()]
     [string]
     $TenantId,
     [Parameter()]
     [string]
-    $AADCertificateThumbprint,
+    $AADCertificateThumbprint ,
     [parameter()]
     [string]
     $AzureClientAppId,
+    [parameter()]
+    [string]
+    $ExchangeClientAppId,
     [parameter()]
     [string]
     $LogPath = (Get-Location),
@@ -93,23 +99,26 @@ param (
     [string]
     $UsageLocation = "US",
     [parameter()]
-    [switch]
-    $TestOnly,
-    [parameter()]
-    [switch]
-    $CurrentOnly,
-    [parameter()]
     [int]
-    $DaysAhead = 7,
+    $DaysAhead = 5,
     [parameter()]
     [string]
     $NotificationEmailAddress,
     [parameter()]
     [string]
-    $EmailSignature = "`n Regards, `n`n $CompanyName Automated User Management `n`n`nFor additional information, please create a service request.`n"
+    $HelpDeskEmailAddress,
+    [parameter()]
+    [string]
+    $EmailSignature = "`n Regards, `n`n $CompanyName Automated User Management `n`n`nFor additional information, please review the IT FAQ.`n",
+    [parameter()]
+    [switch]
+    $TestOnly,
+    [parameter()]
+    [switch]
+    $CurrentOnly
 )
 
-# ERROR LOGGING FUNCTION
+# Logging Function
 $logFileName = "BhrAadSync-" + (Get-Date -Format yyyyMMdd-HHmm) + ".csv"
 $logFilePath = Join-Path $LogPath $logFileName
 $Script:logContent = ""
@@ -143,11 +152,11 @@ function Write-Log {
         }
         Error { 
             Write-Error $Message
-            $Script:logContent += "`n$Message`n"
+            $Script:logContent += "<p>$Message</p>`n"
         }
         Information { 
             Write-Host $Message
-            $Script:logContent += "`n$Message`n"
+            $Script:logContent += "<p>$Message</p>`n"
         }
         Test { 
             Write-Host " [TestOnly] $Message" -ForegroundColor Green
@@ -177,7 +186,7 @@ function Get-NewPassword {
         #
         # Specifies the total length of password to generate
     
-        [int]$SpecialChars = 3
+        [int]$SpecialChars = 2
         # (REQUIRED)
         #
         # Specifies the number of special characters to include in the generated password.
@@ -270,6 +279,7 @@ $companyEmailDomain = $AdminEmailAddress.Split("@")[1]
 $bhrRootUri = "https://api.bamboohr.com/api/gateway.php/$($BHRCompanyName)/v1"
 $bhrReportsUri = $bhrRootUri
 
+
 # If you only want to retrieve the current employees, not future ones use -CurrentOnly.
 if ($CurrentOnly.IsPresent) {
     $bhrReportsUri = "$($bhrRootUri)/reports/custom?format=json&onlyCurrent=true"
@@ -292,7 +302,6 @@ $runtime = Measure-Command -Expression {
         Invoke-RestMethod -Uri $bhrReportsUri -Method POST -Headers $headers -ContentType 'application/json' `
             -Body '{"fields":["status","hireDate","department","employeeNumber","firstName","lastName","displayName","jobTitle","supervisorEmail","workEmail","lastChanged","employmentHistoryStatus","bestEmail","location","workPhone","preferredName","homeEmail"]}' `
             -OutVariable response 
-
     } 
     catch {
         # If error returned, the API call to BambooHR failed and no usable employee data has been returned, write to log file and exit script
@@ -301,10 +310,10 @@ $runtime = Measure-Command -Expression {
         #Send email alert with the generated error
         $params = @{
             Message         = @{
-                Subject      = "User creation automation: Connection to BambooHR has failed"
+                Subject      = "BhrAadSync error: BambooHR connection failed"
                 Body         = @{
-                    ContentType = "text"
-                    Content     = "Hello, `nConnection to BambooHR endpoint has failed. `n EXCEPTION MESSAGE: $($_.Exception.Message) `nCATEGORY: $($_.CategoryInfo.Category) `n SCRIPT STACK TRACE: $($_.ScriptStackTrace) `n $EmailSignature"
+                    ContentType = "html"
+                    Content     = "BambooHR connection failed. <br/> EXCEPTION MESSAGE: $($_.Exception.Message) <br/>CATEGORY: $($_.CategoryInfo.Category) <br/> SCRIPT STACK TRACE: $($_.ScriptStackTrace) `n $EmailSignature"
                 }
                 ToRecipients = @(
                     @{
@@ -344,14 +353,14 @@ $runtime = Measure-Command -Expression {
         # Send email alert with the generated error 
         $params = @{
             Message         = @{
-                Subject      = "User creation automation: MGGraph Azure AD connection failed"
+                Subject      = "BhrAadSync error: Graph connection failed"
                 Body         = @{
-                    ContentType = "text"
-                    Content     = "Hello, `n`nAAD connection failed.`nEXCEPTION: $($error.Exception) `n CATEGORY:$($error.CategoryInfo) `n ERROR ID: $($error.FullyQualifiedErrorId) `nSCRIPT STACK TRACE: $mgErrStack `n $EmailSignature"
+                    ContentType = "html"
+                    Content     = "<br/><br/>AAD connection failed.<br/>EXCEPTION: $($error.Exception) <br/> CATEGORY:$($error.CategoryInfo) <br/> ERROR ID: $($error.FullyQualifiedErrorId) <br/>SCRIPT STACK TRACE: $mgErrStack <br/> $EmailSignature"
                 }
                 ToRecipients = @(
                     @{
-				        EmailAddress = @{
+                        EmailAddress = @{
                             Address = $AdminEmailAddress
                         }
                     }
@@ -388,6 +397,7 @@ $runtime = Measure-Command -Expression {
         $bhrWorkEmail = "$($_.workEmail)"
         # Current status of the employee: Active, Terminated and if contains "Suspended" is in "maternity leave"
         $bhrEmploymentStatus = "$($_.employmentHistoryStatus)"
+        $bhrEmployeeId = "$($_.id)"
         # Translating user "status" from BambooHR to boolean, to match and compare with the AAD user account status
         $bhrStatus = "$($_.status)"
         if ($bhrStatus -eq "Inactive")
@@ -416,7 +426,6 @@ $runtime = Measure-Command -Expression {
             $bhrDisplayName = "$bhrPreferredName $bhrLastName"
         }
 
-        
         Write-Log -Message "BambooHR employee: $bhrFirstName $bhrLastName ($bhrDisplayName) $bhrWorkEmail" -Severity Debug
         Write-Log -Message "Department: $bhrDepartment, Title: $bhrJobTitle, Manager: $bhrSupervisorEmail HireDate: $bhrHireDate" -Severity Debug
         Write-Log -Message "EmployeeId: $bhrEmployeeNumber, Status: $bhrStatus, Employee Status: $bhrEmploymentStatus" -Severity Debug
@@ -446,7 +455,7 @@ $runtime = Measure-Command -Expression {
             }
 
             if ([string]::IsNullOrEmpty($aadEidObjDetails) -eq $false) {
-                #$EID_ExtensionAttribute1 = ($aadEidObjDetails | Select-Object @{Name = 'bhrLastUpdated'; Expression = { $_.AdditionalProperties.bhrLastUpdated } }).bhrLastUpdated
+                #$EIDExtensionAttribute1 = ($aadEidObjDetails | Select-Object @{Name = 'bhrLastUpdated'; Expression = { $_.AdditionalProperties.bhrLastUpdated } }).bhrLastUpdated
             }
 
             # Saving AAD attributes to be compared one by one with the details pulled from BambooHR
@@ -468,8 +477,7 @@ $runtime = Measure-Command -Expression {
 
             if ($aadUpnObjDetails.EmployeeHireDate) {
                 $aadHireDate = $aadUpnObjDetails.EmployeeHireDate.AddHours(12).ToString("yyyy-MM-dd") 
-            }
-            
+            }        
             
             if (([string]::IsNullOrWhiteSpace($aadUpnObjDetails) -eq $false) -or ([string]::IsNullOrWhiteSpace($aadEidObjDetails) -eq $false)) {
                 Write-Log -Message "AAD user: $aadFirstName $aadLastName ($aadDisplayName) $aadWorkEmail" -Severity Debug 
@@ -483,188 +491,15 @@ $runtime = Measure-Command -Expression {
 
                 if (($aadEmployeeNumber -eq $aadEmployeeNumber2 -and `
                             $aadEidObjDetails.UserPrincipalName -eq $aadUpnObjDetails.UserPrincipalName -eq $bhrWorkEmail -and `
-                            $aadUpnObjDetails.id -eq $aadEidObjDetails.id -and `
-                            $bhrLastChanged -ne $UpnExtensionAttribute1 -and `
-                            $aadEidObjDetails.Capacity -ne 0 -and `
-                            $aadUpnObjDetails.Capacity -ne 0 -and `
-                            $bhrEmploymentStatus -notlike "*suspended*") -and $isAadUser -eq $true) { 
+                            $aadUpnObjDetails.id -eq $aadEidObjDetails.id -and $bhrLastChanged -ne $UpnExtensionAttribute1 -and `
+                            $aadEidObjDetails.Capacity -ne 0 -and $aadUpnObjDetails.Capacity -ne 0 -and `
+                            $bhrEmploymentStatus -notlike "*suspended*") `
+                        -and $isAadUser -eq $true) { 
                 
                     Write-Log  -Message "$bhrWorkEmail is a valid AAD Account, with matching EmployeeId and UPN in AAD and BambooHR, but different last modified date." -Severity Debug
-
                     $error.clear() 
-                
-                    # Checking JobTitle if correctly set, if not, configure the JobTitle as set in BambooHR
-                    if ($aadJobTitle.Trim() -ne $bhrJobTitle.Trim()) {
-                        Write-Log -Message "AAD Job Title $aadJobTitle does not match BHR Job Title $bhrJobTitle" -Severity Debug
-                    
-                        if ($TestOnly.IsPresent) {
-                        
-                            Write-Log -Message " Executing: Update-MgUser -UserId $bhrWorkEmail -JobTitle $bhrJobTitle" -Severity Test   
-                        }
-                        else {
-                            Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -JobTitle '$bhrJobTitle'" -Severity Debug
-                            if ([string]::IsNullOrWhiteSpace($bhrJobTitle) -eq $false) {
-                                Update-MgUser -UserId $bhrWorkEmail -JobTitle $bhrJobTitle
-                            }
-                            else {
-                                Update-MgUser -UserId $bhrWorkEmail -JobTitle $null 
-                            }
-
-                            if (!$?) {
-
-                                Write-Log -Message "Error changing Job Title of $bhrWorkEmail.`nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
-                                $error.Clear()
-                            }
-                            else {
-                                $error.Clear()
-                                Write-Log -Message "JobTitle for $bhrWorkEmail in AAD set from  $aadjobTitle to $bhrjobTitle." -Severity Information
-                            }
-                        }
-                    }
-
-                    # Checking department if correctly set, if not, configure the Department as set in BambooHR
-                    if ($aadDepartment.Trim() -ne $bhrDepartment.Trim()) {
-                        Write-Log -Message "AAD department '$aadDepartment' does not match BambooHR department '$($bhrDepartment.Trim())'" -Severity Debug
-                        if ($TestOnly.IsPresent) {                   
-                            Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -Department $bhrDepartment" -Severity Test
-                        }
-                        else {
-                            Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -Department $bhrDepartment" -Severity Debug
-                            Update-MgUser -UserId $bhrWorkEmail -Department "$bhrDepartment"
-                            if (!$?) {
-
-                                Write-Log -Message "Error changing Department of $bhrWorkEmail `nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
-                                $error.Clear()
-                            }
-                            else {
-                                $error.Clear()
-                                Write-Log -Message "Department for $bhrWorkEmail in AAD set from $aadDepartment to $bhrDepartment." -Severity Information
-                            }
-                        }
-                    }
-                    else {
-                        Write-Log "AAD and BHR department already matches $aadDepartment" -Severity Debug
-                    }
-        
-                    # Checking the manager if correctly set, if not, configure the manager as set in BambooHR
-                    if ($aadSupervisorEmail -ne $bhrSupervisorEmail -and ([string]::IsNullOrWhiteSpace($bhrSupervisorEmail) -eq $false)) {
-                        Write-Log -Message "Manager in AAD '$aadSupervisorEmail' does not match BHR manager '$bhrSupervisorEmail'" -Severity Debug
-                    
-                        $aadManagerID = (Get-MgUser -UserId $bhrSupervisorEmail | Select-Object id ).id 
-                        $newManager = @{
-                            "@odata.id" = "https://graph.microsoft.com/v1.0/users/$aadmanagerID"
-                        }
-
-                        if ($TestOnly.IsPresent) {                
-                            Write-Log -Message "Executing: Set-MgUserManagerByRef -UserId $bhrWorkEmail -BodyParameter $newManager"
-                        }
-                        else {
-
-                            Set-MgUserManagerByRef -UserId $bhrWorkEmail -BodyParameter $newManager
-                            if (!$?) {
-
-                                Write-Log -Message "Error changing manager of $bhrWorkEmail. `nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
-                                $error.Clear()
-                            }
-                            else {
-                                $error.Clear()
-                                Write-Log -Message "Manager of $bhrWorkEmail in AAD '$aadsupervisorEmail' and in BambooHR '$bhrsupervisorEmail'. Setting the Manager found on BambooHR to the Azure User Object." -Severity Warning
-                            }
-                        }
-                    }
-                    else {
-                        Write-Log -Message "Supervisor email already correct $aadSuperVisorEmail" -Severity Debug
-                    }
-
-                    # Check and set the Office Location
-                    if ($aadOfficeLocation.Trim() -ne $bhrOfficeLocation.Trim()) {
-                        Write-Log -Message "AAD office location '$aadOfficeLocation' does not match BHR hire data '$bhrOfficeLocation'" -Severity Debug
-                        if ($TestOnly.IsPresent) {
-                       
-                            Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -OfficeLocation $($bhrOfficeLocation.Trim())" -Severity Test
-                        }
-                        else {
-                            Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -OfficeLocation $($bhrOfficeLocation.Trim())" -Severity Debug
-                            Update-MgUser -UserId $bhrWorkEmail -OfficeLocation $bhrOfficeLocation.Trim()
-                            if (!$?) {
-
-                                Write-Log -Message "Error changing employee office location. `nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
-                                $error.Clear()
-                            }
-                            else {
-                                $error.Clear()
-                                Write-Log -Message "Office location of $bhrWorkEmail matches in AAD and BHR $bhrOfficeLocation." -Severity Information
-                            }
-                        }
-                    }
-                    else {
-                        Write-Log -Message "Office Location correct $aadOfficeLocation" -Severity Debug
-                    }
-
-                    # Check and set the Employee Hire Date
-                    if ($aadHireDate -ne $bhrHireDate) {
-                        Write-Log -Message "AAD hire date '$aadHireDate' does not match BHR hire data '$bhrHireDate'" -Severity Debug
-                        if ($TestOnly.IsPresent) {
-                                       
-                            Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -EmployeeHireDate $bhrHireDate" -Severity Test
-                        }
-                        else {
-                            Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -EmployeeHireDate $bhrHireDate" -Severity Debug
-                            Update-MgUser -UserId $bhrWorkEmail -EmployeeHireDate $bhrHireDate
-                            if (!$?) {
-                
-                                Write-Log -Message "Error changing employee hire date. `nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
-                                $error.Clear()
-                            }
-                            else {
-                                $error.Clear()
-                                Write-Log -Message "Hire date of $bhrWorkEmail changed from $aadHireDate in AAD and BHR $bhrHireDate." -Severity Information
-                            }
-                        }
-                    }
-                    else {
-                        Write-Log -Message "Hire date already correct $aadHireDate" -Severity Debug
-                    }
-
-                    # Check and set the workphone
-                    if ($aadWorkPhone -ne $bhrWorkPhone) {
-                        Write-Log -Message "AAD work phone '$aadWorkPhone' does not match BHR '$bhrWorkPhone'" -Severity Debug
-                        if ([string]::IsNullOrWhiteSpace($bhrWorkPhone)) {
-                            $bhrWorkPhone = $null
-                        }
-
-                        if ($TestOnly.IsPresent) {
-                                       
-                            Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BusinessPhones $bhrWorkPhone" -Severity Test
-                        }
-                        else {
-                            if ([string]::IsNullOrWhiteSpace($bhrWorkPhone)) {
-                                $bhrWorkPhone = $null
-                                Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BusinessPhones $null" -Severity Debug
-                                Update-MgUser -UserId $bhrWorkEmail -BusinessPhones $null -ErrorAction Continue
-                            }
-                            else {
-                                Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BusinessPhones $bhrWorkPhone" -Severity Debug
-                                Update-MgUser -UserId $bhrWorkEmail -BusinessPhones $bhrWorkPhone -ErrorAction Continue
-                            }
-
-                            if (!$?) {
-                
-                                Write-Log -Message "Error changing employee work phone. `nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
-                                $error.Clear()
-                            }
-                            else {
-                                $error.Clear()
-                                Write-Log -Message "Work Phone for '$bhrWorkEmail' changed from '$aadWorkPhone' to '$bhrWorkPhone'" -Severity Information
-                            }
-                        }
-                    }
-                    else {
-                        Write-Log -Message "Work phone correct $aadWorkPhone" -Severity Debug
-                    }
 
                     # Check if user is active in BambooHR, and set the status of the account as it is in BambooHR (active or inactive)
-         
                     if ($bhrAccountEnabled -eq $false -and $bhrEmploymentStatus.Trim() -eq "Terminated" -and $aadStatus -eq $true ) {
                         Write-Log -Message "Account is marked Inactive in BHR and Active in AAD, block sign-in, revoke sessions, change pass, remove auth methods"
                         # The account is marked "Inactive" in BHR and "Active" in AAD, block sign-in, revoke sessions, change pass, remove auth methods
@@ -687,36 +522,51 @@ $runtime = Measure-Command -Expression {
                             PasswordProfile = @{
                                 ForceChangePasswordNextSignIn = $true
                                 Password                      = (Get-NewPassword)
+                                Department                    = ""
+                                JobTitle                      = ""
+                                OfficeLocation                = ""
                             }
                         }
 
                         if ($TestOnly.IsPresent) {
-                            Write-Log -Message " Executing: Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params"  -Severity Test
-                            Write-Log -Message " Executing: Get-MgUserMemberOf -UserId $bhrWorkEmail"  -Severity Test
+                            Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params"  -Severity Test
+                            Write-Log -Message "Executing: Get-MgUserMemberOf -UserId $bhrWorkEmail"  -Severity Test
 
-                            Write-Log -Message " Convert Mailbox to shared..." -Severity Test
-                            Write-Log -Message " Executing: Set-Mailbox -Identity $bhrWorkEmail -Type Shared" -Severity Test
-                            Write-Log -Message " Removing licenses..." -Severity Test
-                            Write-Log -Message " Executing: Get-MgUserLicenseDetail -UserId $bhrWorkEmail | ForEach-Object { Set-MgUserLicense -UserId $bhrWorkEmail -RemoveLicenses $_.SkuId -AddLicenses @{} }" -Severity Test
+                            Write-Log -Message "Converting $bhrWorkEmail to a shared mailbox..." -Severity Test
+                            Write-Log -Message "Executing: Set-Mailbox -Identity $bhrWorkEmail -Type Shared" -Severity Test
+                            Write-Log -Message "Removing licenses..." -Severity Test
+                            Write-Log -Message "Executing: Get-MgUserLicenseDetail -UserId $bhrWorkEmail | ForEach-Object { Set-MgUserLicense -UserId $bhrWorkEmail -RemoveLicenses $_.SkuId -AddLicenses @{} }" -Severity Test
                         
-                            Write-Log -Message " Remove group memberships" -Severity Test
-                            Write-Log -Message " Executing: Get-MgUserMemberOf -UserId $bhrWorkEmail | ForEach-Object { Remove-MgGroupMemberByRef -GroupId $_.id -DirectoryObjectId $aadUpnObjDetails.id } " -Severity Test
+                            Write-Log -Message "Remove group memberships" -Severity Test
+                            Write-Log -Message "Executing: Get-MgUserMemberOf -UserId $bhrWorkEmail | ForEach-Object { Remove-MgGroupMemberByRef -GroupId $_.id -DirectoryObjectId $aadUpnObjDetails.id } " -Severity Test
 
-                            Write-Log -Message " Remove MFA auth for user" -Severity Test
+                            Write-Log -Message "Remove MFA auth for user" -Severity Test
 
                         }
                         else {
+                            Write-Log -Message "User $bhrWorkEmail is no longer active in BambooHR, disabling AAD account." -Severity Information
+                            Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params"  -Severity Debug
                             Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params
                             Get-MgUserMemberOf -UserId $bhrWorkEmail
 
                             # Convert mailbox to shared
-                            Connect-ExchangeOnline -CertificateThumbprint $AADCertificateThumbprint -AppId $AzureClientAppId -Organization $TenantId 
+                            Connect-ExchangeOnline -CertificateThumbprint $AADCertificateThumbprint -AppId $ExchangeClientAppId -Organization $TenantId 
+                            #Connect-ExchangeOnline -Organization $TenantId 
+                            Write-Log -Message "Executing: Set-Mailbox -Identity $bhrWorkEmail -Type Shared" -Severity Debug
+                            Write-Log -Message "Converting $bhrWorkEmail to a shared mailbox..." -Severity Debug
                             Set-Mailbox -Identity $bhrWorkEmail -Type Shared
                             Disconnect-ExchangeOnline -Confirm:$False
+                            
                             # Remove Licenses
-
+                            Write-Log -Message "Removing licenses..." -Severity Debug
+                            
+                            Write-Log -Message "Executing: Get-MgUserLicenseDetail -UserId $bhrWorkEmail | ForEach-Object { Set-MgUserLicense -UserId $bhrWorkEmail -RemoveLicenses $_.SkuId -AddLicenses @{} }" -Severity Debug
                             Get-MgUserLicenseDetail -UserId $bhrWorkEmail | ForEach-Object { Set-MgUserLicense -UserId $bhrWorkEmail -RemoveLicenses $_.SkuId -AddLicenses @{} }
+                            
                             # Remove groups
+                            Write-Log -Message "Remove group memberships" -Severity Debug
+                            Write-Log -Message "Executing: Get-MgUserMemberOf -UserId $bhrWorkEmail | ForEach-Object { Remove-MgGroupMemberByRef -GroupId $_.id -DirectoryObjectId $aadUpnObjDetails.id } " -Severity Debug
+                            
                             Get-MgUserMemberOf -UserId $bhrWorkEmail | ForEach-Object { Remove-MgGroupMemberByRef -GroupId $_.id -DirectoryObjectId $aadUpnObjDetails.id } 
                             $methodID = Get-MgUserAuthenticationMethod -UserId $bhrWorkEmail | Select-Object id 
                             $methodsdata = Get-MgUserAuthenticationMethod -UserId $bhrWorkEmail | Select-Object -ExpandProperty AdditionalProperties
@@ -731,106 +581,318 @@ $runtime = Measure-Command -Expression {
                                 if ((($methodsdata[$i]).Values) -like "*microsoftAuthenticatorAuthenticationMethod*") { Remove-MgUserAuthenticationMicrosoftAuthenticatorMethod -UserId $bhrWorkEmail -MicrosoftAuthenticatorAuthenticationMethodId ($methodID[$i]).id; Write-Log -Message "Removed auth app method for $bhrWorkEmail." -Severity Warning }
                                 if ((($methodsdata[$i]).Values) -like "*windowsHelloForBusinessAuthenticationMethod*") { Remove-MgUserAuthenticationFido2Method -UserId $bhrWorkEmail -Fido2AuthenticationMethodId ($methodID[$i]).id ; Write-Log -Message "Removed PIN auth method for $bhrWorkEmail." -Severity Warning }
                             }
+                            Write-Log -Message "Executing: Update-MgUser -EmployeeId 'LVR' -UserId $bhrWorkEmail" -Severity Debug
+                            Update-MgUser -EmployeeId 'LVR' -UserId $bhrWorkEmail
 
-                            # Update-MgUser -EmployeeId "LVR" -UserId $bhrWorkEmail.Trim()                                            
                             if ($error.Count -ne 0) {
                                 $error | ForEach-Object {
                                     $err_Exception = $_.Exception
                                     $err_Target = $_.TargetObject
                                     $errCategory = $_.CategoryInfo
-                                    Write-Log "Could not remove authentication details. `
- Exception: $err_Exception `n Target Object: $err_Target `n Error Category: $errCategory " -Severity Error
+                                    Write-Log " Could not remove authentication details. `n Exception: $err_Exception `n Target Object: $err_Target `n Error Category: $errCategory " -Severity Error
                                 }
                             }
                             else {
-                                Write-Log -Message "Account $bhrWorkEmail marked as inactive in BambooHR AAD account has been disabled, sessions revoked and removed MFA." -Severity Information              
+                                Write-Log -Message " Account $bhrWorkEmail marked as inactive in BambooHR AAD account has been disabled, sessions revoked and removed MFA." -Severity Information              
                                 $error.Clear()
                             }
                         }
                     }
                     else {
-                        Write-Log "Account is not disabled or terminated." -Severity Debug
-                    }
-          
-                    if ($bhrAccountEnabled -eq $true -and $aadstatus -eq $false) {
-                        # The account is marked "Active" in BHR and "Inactive" in AAD, enable the AAD account
-                        Write-Log -Message "$bhrWorkEmail is marked Active in BHR and Inactive in AAD" -Severity Debug
-                        if ($TestOnly.IsPresent) {
-                            Write-Log -Message " Executing: Update-MgUser -UserId $bhrWorkEmail -AccountEnabled:$bhrAccountEnabled" -Severity Test
-                        }
-                        else {
-                            Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -AccountEnabled:$bhrAccountEnabled" -Severity Debug
-                            Update-MgUser -UserId $bhrWorkEmail -AccountEnabled:$bhrAccountEnabled
-                            if (!$?) {
+                        Write-Log "Account is not disabled or terminated. Will continue to update active user data." -Severity Debug
+  
+                        if ($bhrAccountEnabled -eq $true -and $aadstatus -eq $false) {
+                            # The account is marked "Active" in BHR and "Inactive" in AAD, enable the AAD account
+                            Write-Log -Message "$bhrWorkEmail is marked Active in BHR and Inactive in AAD" -Severity Debug
+
+                            #Change to a random pass
+                            $newPas = (Get-NewPassword)
+                            $params = @{
+                                PasswordProfile = @{
+                                    ForceChangePasswordNextSignIn = $true
+                                    Password                      = $newPas
+                                }
+                            }
+
+                            if ($TestOnly.IsPresent) {
+                            
+                                Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -AccountEnabled:$bhrAccountEnabled" -Severity Test
+                                Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params" -Severity Test
+                            }
+                            else {
+                                Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -AccountEnabled:$bhrAccountEnabled" -Severity Debug                         
+                                Update-MgUser -UserId $bhrWorkEmail -AccountEnabled:$bhrAccountEnabled
+                                Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params" -Severity Debug
+                                Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params
+
+                                $params = @{
+                                    Message         = @{
+                                        Subject       = "User Account Re-enabled: $bhrdisplayName"
+                                        Body          = @{
+                                            ContentType = "html"
+                                            Content     = "<br/>One of your direct report's user account has been re-enabled. Please securely share this information with them so that they can login.<br/> User name: $bhrWorkEmail <br/> Temporary Password: $newPas.`n $EmailSignature"
+                                        }
+                                        ToRecipients  = @(
+                                            @{
+                                                EmailAddress = @{
+                                                    Address = $bhrSupervisorEmail
+                                                }
+                                            }
+                                        )
+                                        BCCRecipients = @(
+                                            @{
+                                                EmailAddress = @{
+                                                    Address = $NotificationEmailAddress
+                                                }
+                                            }
+                                        )
+                                    }
+                                    SaveToSentItems = "True"
+                                }
+
+                                Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress
+
+                                if (!$?) {
     
-                                Write-Log -Message "Could not activate the user account. ``nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
-                                $error.Clear()
+                                    Write-Log -Message " Could not activate the user account. `n`nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
+                                    $error.Clear()
+                                }
+                                else {
+                                    Write-Log -Message " Account $bhrWorkEmail marked as Active in BambooHR but Inactive in AAD. Enabled AAD account for sign-in." -Severity Information
+                                    $error.Clear()
+                                }                   
                             }
-                            else {
-                                Write-Log -Message "Account $bhrWorkEmail marked as Active in BambooHR but Inactive in AAD. Enabled AAD account for sign-in." -Severity Information
-                                $error.Clear()
-                            }                   
-                        }
-                    }
-                    else {
-                        Write-Log -Message "Account is not enabled in BHR and disabled in AAD" -Severity Debug
-                    }
-               
-                    # Compare user employee id with BambooHR and set it if not correct
-                    if ($bhrEmployeeNumber.Trim() -ne $aadEmployeeNumber.Trim()) {
-                        Write-Log -Message "BHR employee number $bhrEmployeeNumber does not match AAD employee id $aadEmployeeNumber" -Severity Debug
-                        if ($TestOnly.IsPresent) {
-                            Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -EmployeeId $bhremployeeNumber  "
                         }
                         else {
-                            # Setting the Employee ID found in BHR to the user in AAD
-                            Update-MgUser -UserId $bhrWorkEmail -EmployeeId $bhremployeeNumber.Trim()             
-                            if (!$?) {
-                                $err_msg = $Error.exception
-                                $err_TargetObject = $error.TargetObject
-                                $err_details = $error.ErrorDetails
-                                $err_trace = $error.ScriptStackTrace
-
-                                Write-Log -Message "Error changing EmployeeId. `nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
-                                $error.Clear()
-                            }
-                            else {
-                                Write-Log -Message "The ID $bhremployeeNumber has been set to $bhrWorkEmail AAD account. IF condition result is True." -Severity Warning
-                                $error.Clear()
-                            }
+                            Write-Log -Message "Account is not enabled in BHR and is disabled in AAD" -Severity Debug
                         }
-                    }
-                    else {
-                        Write-Log -Message "Employee ID matched $bhrEmployeeNumber and $aadEmployeeNumber" -Severity Debug
-                    }
-
-                    # Set Company name to $CompanyName"
-                    if ($aadCompanyName.Trim() -ne $CompanyName.Trim()) {
-                        Write-Log -Message "AAD company name '$aadCompany' does not match '$CompanyName'" -Severity Debug
-                        if ($TestOnly.IsPresent) {
                     
-                            Write-Log -Message " Executing: Update-MgUser -UserId $bhrWorkEmail -CompanyName $($CompanyName.Trim())" -Severity Information -Severity Test
-                        }
-                        else {
-                            # Setting Company Name as $CompanyName to the employee, if not already set
-                            Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -CompanyName $($CompanyName.Trim())" -Severity Debug
-                            Update-MgUser -UserId $bhrWorkEmail -CompanyName $CompanyName.Trim()
-                            if (!$?) {
-
-                                Write-Log -Message "Could not change the Company Name of $bhrWorkEmail. `nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
-                                $error.Clear()
+                        # Checking JobTitle if correctly set, if not, configure the JobTitle as set in BambooHR
+                        if ($aadJobTitle.Trim() -ne $bhrJobTitle.Trim()) {
+                            Write-Log -Message "AAD Job Title $aadJobTitle does not match BHR Job Title $bhrJobTitle" -Severity Debug
+                    
+                            if ($TestOnly.IsPresent) {
+                        
+                                Write-Log -Message " Executing: Update-MgUser -UserId $bhrWorkEmail -JobTitle $bhrJobTitle" -Severity Test   
                             }
                             else {
-                                Write-Log -Message "The $bhrWorkEmail employee Company attribute has been set to: $CompanyName." -Severity Information
+                                Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -JobTitle '$bhrJobTitle'" -Severity Debug
+                                if ([string]::IsNullOrWhiteSpace($bhrJobTitle) -eq $false) {
+                                    Update-MgUser -UserId $bhrWorkEmail -JobTitle $bhrJobTitle
+                                }
+                                else {
+                                    Update-MgUser -UserId $bhrWorkEmail -JobTitle $null 
+                                }
+
+                                if (!$?) {
+
+                                    Write-Log -Message "Error changing Job Title of $bhrWorkEmail.`nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
+                                    $error.Clear()
+                                }
+                                else {
+                                    $error.Clear()
+                                    Write-Log -Message "JobTitle for $bhrWorkEmail in AAD set from '$aadjobTitle' to '$bhrjobTitle'." -Severity Information
+                                }
                             }
                         }
-                    }
-                    else {
-                        Write-Log -Message "Company name already matched in AAD and BHR $aadCompanyName" -Severity Debug
-                    }
 
-                    # Set LastModified from BambooHR to ExtensionAttribute1 in AAD
-<#
+                        # Checking department if correctly set, if not, configure the Department as set in BambooHR
+                        if ($aadDepartment.Trim() -ne $bhrDepartment.Trim()) {
+                            Write-Log -Message "AAD department '$aadDepartment' does not match BambooHR department '$($bhrDepartment.Trim())'" -Severity Debug
+                            if ($TestOnly.IsPresent) {                   
+                                Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -Department $bhrDepartment" -Severity Test
+                            }
+                            else {
+                                Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -Department $bhrDepartment" -Severity Debug
+                                Update-MgUser -UserId $bhrWorkEmail -Department "$bhrDepartment"
+                                if (!$?) {
+
+                                    Write-Log -Message "Error changing Department of $bhrWorkEmail `nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
+                                    $error.Clear()
+                                }
+                                else {
+                                    $error.Clear()
+                                    Write-Log -Message "Department for $bhrWorkEmail in AAD set from '$aadDepartment' to '$bhrDepartment'." -Severity Information
+                                }
+                            }
+                        }
+                        else {
+                            Write-Log "AAD and BHR department already matches $aadDepartment" -Severity Debug
+                        }
+        
+                        # Checking the manager if correctly set, if not, configure the manager as set in BambooHR
+                        if ($aadSupervisorEmail -ne $bhrSupervisorEmail -and ([string]::IsNullOrWhiteSpace($bhrSupervisorEmail) -eq $false)) {
+                            Write-Log -Message "Manager in AAD '$aadSupervisorEmail' does not match BHR manager '$bhrSupervisorEmail'" -Severity Debug
+                    
+                            $aadManagerID = (Get-MgUser -UserId $bhrSupervisorEmail | Select-Object id ).id 
+                            $newManager = @{
+                                "@odata.id" = "https://graph.microsoft.com/v1.0/users/$aadmanagerID"
+                            }
+
+                            if ($TestOnly.IsPresent) {                
+                                Write-Log -Message "Executing: Set-MgUserManagerByRef -UserId $bhrWorkEmail -BodyParameter $newManager"
+                            }
+                            else {
+
+                                Set-MgUserManagerByRef -UserId $bhrWorkEmail -BodyParameter $newManager
+                                if (!$?) {
+
+                                    Write-Log -Message "Error changing manager of $bhrWorkEmail. `nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
+                                    $error.Clear()
+                                }
+                                else {
+                                    $error.Clear()
+                                    Write-Log -Message "Manager of $bhrWorkEmail in AAD '$aadsupervisorEmail' and in BambooHR '$bhrsupervisorEmail'. Setting the Manager found on BambooHR to the Azure User Object." -Severity Warning
+                                }
+                            }
+                        }
+                        else {
+                            Write-Log -Message "Supervisor email already correct $aadSuperVisorEmail" -Severity Debug
+                        }
+
+                        # Check and set the Office Location
+                        if ($aadOfficeLocation.Trim() -ne $bhrOfficeLocation.Trim()) {
+                            Write-Log -Message "AAD office location '$aadOfficeLocation' does not match BHR hire data '$bhrOfficeLocation'" -Severity Debug
+                            if ($TestOnly.IsPresent) {
+                       
+                                Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -OfficeLocation $($bhrOfficeLocation.Trim())" -Severity Test
+                            }
+                            else {
+                                Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -OfficeLocation $($bhrOfficeLocation.Trim())" -Severity Debug
+                                Update-MgUser -UserId $bhrWorkEmail -OfficeLocation $bhrOfficeLocation.Trim()
+                                if (!$?) {
+
+                                    Write-Log -Message "Error changing employee office location. `nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
+                                    $error.Clear()
+                                }
+                                else {
+                                    $error.Clear()
+                                    Write-Log -Message "Office location of $bhrWorkEmail in AAD changed from '$aadOfficeLocation' to '$bhrOfficeLocation'." -Severity Information
+                                }
+                            }
+                        }
+                        else {
+                            Write-Log -Message "Office Location correct $aadOfficeLocation" -Severity Debug
+                        }
+
+                        # Check and set the Employee Hire Date
+                        if ($aadHireDate -ne $bhrHireDate) {
+                            Write-Log -Message "AAD hire date '$aadHireDate' does not match BHR hire data '$bhrHireDate'" -Severity Debug
+                            if ($TestOnly.IsPresent) {
+                                       
+                                Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -EmployeeHireDate $bhrHireDate" -Severity Test
+                            }
+                            else {
+                                Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -EmployeeHireDate $bhrHireDate" -Severity Debug
+                                Update-MgUser -UserId $bhrWorkEmail -EmployeeHireDate $bhrHireDate
+                                if (!$?) {
+                
+                                    Write-Log -Message "Error changing $bhrWorkEmail hire date. `nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
+                                    $error.Clear()
+                                }
+                                else {
+                                    $error.Clear()
+                                    Write-Log -Message "Hire date of $bhrWorkEmail changed from '$aadHireDate' in AAD and BHR '$bhrHireDate'." -Severity Information
+                                }
+                            }
+                        }
+                        else {
+                            Write-Log -Message "Hire date already correct $aadHireDate" -Severity Debug
+                        }
+
+                        # Check and set the workphone
+                        if ($aadWorkPhone -ne $bhrWorkPhone) {
+                            Write-Log -Message "AAD work phone '$aadWorkPhone' does not match BHR '$bhrWorkPhone'" -Severity Debug
+                            if ([string]::IsNullOrWhiteSpace($bhrWorkPhone)) {
+                                $bhrWorkPhone = $null
+                            }
+
+                            if ($TestOnly.IsPresent) {
+                                       
+                                Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BusinessPhones $bhrWorkPhone" -Severity Test
+                            }
+                            else {
+                                if ([string]::IsNullOrWhiteSpace($bhrWorkPhone)) {
+                                    $bhrWorkPhone = $null
+                                    Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BusinessPhones $null" -Severity Debug
+                                    Update-MgUser -UserId $bhrWorkEmail -BusinessPhones "$null" -ErrorAction Continue
+                                }
+                                else {
+                                    Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BusinessPhones $bhrWorkPhone" -Severity Debug
+                                    Update-MgUser -UserId $bhrWorkEmail -BusinessPhones "$bhrWorkPhone" -ErrorAction Continue
+                                }
+
+                                if (!$?) {
+                
+                                    Write-Log -Message "Error changing $bhrWorkEmail work phone. `nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
+                                    $error.Clear()
+                                }
+                                else {
+                                    $error.Clear()
+                                    Write-Log -Message "Work Phone for '$bhrWorkEmail' changed from '$aadWorkPhone' to '$bhrWorkPhone'" -Severity Information
+                                }
+                            }
+                        }
+                        else {
+                            Write-Log -Message "Work phone correct $aadWorkPhone" -Severity Debug
+                        }
+              
+                        # Compare user employee id with BambooHR and set it if not correct
+                        if ($bhrEmployeeNumber.Trim() -ne $aadEmployeeNumber.Trim()) {
+                            Write-Log -Message " BHR employee number $bhrEmployeeNumber does not match AAD employee id $aadEmployeeNumber" -Severity Debug
+                            if ($TestOnly.IsPresent) {
+                                Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -EmployeeId $bhremployeeNumber  "
+
+                            }
+                            else {
+                                # Setting the Employee ID found in BHR to the user in AAD
+                                Update-MgUser -UserId $bhrWorkEmail -EmployeeId $bhremployeeNumber.Trim()             
+                                if (!$?) {
+                                    $err_msg = $Error.exception
+                                    $err_TargetObject = $error.TargetObject
+                                    $err_details = $error.ErrorDetails
+                                    $err_trace = $error.ScriptStackTrace
+
+                                    Write-Log -Message " Error changing EmployeeId. `nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
+                                    $error.Clear()
+                                }
+                                else {
+                                    Write-Log -Message " The ID $bhremployeeNumber has been set to $bhrWorkEmail AAD account. IF condition result is True." -Severity Warning
+                                    $error.Clear()
+                                }
+                            }
+                        }
+                        else {
+                            Write-Log -Message "Employee ID matched $bhrEmployeeNumber and $aadEmployeeNumber" -Severity Debug
+                        }
+
+                        # Set Company name to $CompanyName"
+                        if ($aadCompanyName.Trim() -ne $CompanyName.Trim()) {
+                            Write-Log -Message "AAD company name '$aadCompany' does not match '$CompanyName'" -Severity Debug
+                            if ($TestOnly.IsPresent) {
+                    
+                                Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -CompanyName $($CompanyName.Trim())" -Severity Information -Severity Test
+                            }
+                            else {
+                                # Setting Company Name as $CompanyName to the employee, if not already set
+                                Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -CompanyName $($CompanyName.Trim())" -Severity Debug
+                                Update-MgUser -UserId $bhrWorkEmail -CompanyName $CompanyName.Trim()
+                                if (!$?) {
+
+                                    Write-Log -Message " Could not change the Company Name of $bhrWorkEmail. `nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
+                                    $error.Clear()
+                                }
+                                else {
+                                    Write-Log -Message " The $bhrWorkEmail employee Company attribute has been set to: $CompanyName." -Severity Information
+                                }
+                            }
+                        }
+                        else {
+                            Write-Log -Message "Company name already matched in AAD and BHR $aadCompanyName" -Severity Debug
+                        }
+
+                        # Set LastModified from BambooHR to ExtensionAttribute1 in AAD
+                        <#
                      if ($upnExtensionAttribute1 -ne $bhrLastChanged) {
                         # Setting the "lastchanged" attribute from BambooHR to ExtensionAttribute1 in AAD
                         Write-Log -Message "AAD Extension Attribute '$upnExtensionAttribute1' does not match BHR last changed '$bhrLastChanged'" -Severity Debug
@@ -864,295 +926,295 @@ $runtime = Measure-Command -Expression {
                         Write-Log -Message "Attribute already matched last changed of $bhrLastChanged" -Severity Debug
                     } 
 #>
+                    }
                 }
-            }
-            else {
-                Write-Log -Message "No AAD user found for $bhrWorkEmail" -Severity Debug
-                $noAADAccount = $true
+                else {
+                    Write-Log -Message "No AAD user found for $bhrWorkEmail" -Severity Debug
+                    $noAADAccount = $true
                 
-                # This might not be needed anymore
-                $aadWorkEmail = ""
-                $aadJobTitle = ""
-                $aadDepartment = ""
-                $aadStatus = ""
-                $aadEmployeeNumber = ""
-                $aadSupervisorEmail = ""
-                $aadDisplayname = ""
-                $aadHireDate = ""
-                $aadFirstName = ""
-                $aadLastName = ""
-                $aadCompanyName = ""
-                $aadWorkPhone = ""
-                $aadOfficeLocation = ""
-                $isAadUser = $false
-            }
+                    # This might not be needed anymore
+                    $aadWorkEmail = ""
+                    $aadJobTitle = ""
+                    $aadDepartment = ""
+                    $aadStatus = ""
+                    $aadEmployeeNumber = ""
+                    $aadSupervisorEmail = ""
+                    $aadDisplayname = ""
+                    $aadHireDate = ""
+                    $aadFirstName = ""
+                    $aadLastName = ""
+                    $aadCompanyName = ""
+                    $aadWorkPhone = ""
+                    $aadOfficeLocation = ""
+                    $isAadUser = $false
+                }
 
-            # Handle name changes 
-            if ($aadEmployeeNumber -eq $bhremployeeNumber -and $historystatus -notlike "*inactive*") {
-                $aadUPN = $aadEidObjDetails.UserPrincipalName
-                $aadObjectID = $aadEidObjDetails.id
-                $aadworkemail = $aadEidObjDetails.Mail
-                $aademployeeNumber = $aadEidObjDetails.EmployeeID
-                $aaddisplayname = $aadEidObjDetails.displayname
-                $aadfirstName = $aadEidObjDetails.GivenName
-                $aadlastName = $aadEidObjDetails.Surname
+                # Handle name changes 
+                if (($aadEmployeeNumber2 -eq $bhremployeeNumber -and $historystatus -notlike "*inactive*") -and $noAADAccount) {
 
-                Write-Log -Message "Initiated AAD name change for $aadfirstName $aadlastName ($aaddisplayname) `n`t Work Email: $aadWorkEmail UserPrincipalName: $aadUpn EmployeeId: $aadEmployeeNumber" -Severity Debug
+                    $aadUPN = $aadEidObjDetails.UserPrincipalName
+                    $aadObjectID = $aadEidObjDetails.id
+                    $aadworkemail = $aadEidObjDetails.Mail
+                    $aademployeeNumber = $aadEidObjDetails.EmployeeID
+                    $aaddisplayname = $aadEidObjDetails.displayname
+                    $aadfirstName = $aadEidObjDetails.GivenName
+                    $aadlastName = $aadEidObjDetails.Surname
+
+                    Write-Log -Message "Evaluating if AAD name change is required for $aadfirstName $aadlastName ($aaddisplayname) `n`t Work Email: $aadWorkEmail UserPrincipalName: $aadUpn EmployeeId: $aadEmployeeNumber" -Severity Debug
            
-                $error.Clear()
-                # 3/31/23 Is this required here or should it be handled after the name change or the next sync after the name change?
-                #                 # Set LastModified from BambooHR to ExtensionAttribute1 in AAD
-                #                 if ($EID_ExtensionAttribute1 -ne $bhrlastChanged) {
+                    $error.Clear()
+                    
+                    # 3/31/2023 Is this required here or should it be handled after the name change or the next sync after the name change?
+                    #                 # Set LastModified from BambooHR to ExtensionAttribute1 in AAD
+                    #                 if ($EID_ExtensionAttribute1 -ne $bhrlastChanged) {
+                    #                     if ($TestOnly.IsPresent) {
+                    #                         #Write-Log -Message "The $bhrWorkEmail employee LastChanged attribute set to extensionAttribute1 as $bhrlastChanged." -Severity Information -Severity Test
+                    #                         Write-Log -Message "Executing: Update-MgUser -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged } -UserId $aadObjectID" -Severity Test
+                    #                     }
+                    #                     else {
+                    #                         # Setting the "lastchanged" attribute from BambooHR to ExtensionAttribute1 in AAD
+                    #                         # Write-Log -Message "The $bhrWorkEmail employee LastChanged attribute set to extensionAttribute1 as $bhrlastChanged." -Severity Information
+                    #                         Write-Log -Message "Executing: Update-MgUser -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged } -UserId $aadObjectID" -Severity Debug
+                    #                         # TODO
+                    #                         Update-MgUser -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged } -UserId $aadObjectID        
+                    #                         if (!$?) {
+                    #                             $err_msg = $Error.exception
+                    #                             $err_TargetObject = $error.TargetObject
+                    #                             $err_details = $error.ErrorDetails
+                    #                             $err_trace = $error.ScriptStackTrace
+                    #                             Write-Log -Message "Error changing ExtensionAttribute1.`
+                    # Exception: $err_msg `n Target object: $err_TargetObject`n Details: $err_details `n StackTrace: $err_trace" -Severity Error
+                    #                             $error.Clear()
+                    #                         }
+                    #                         else {
+                    #                             Write-Log -Message "ExtensionAttribute1 changed to: $bhrlastChanged for employee $bhrWorkEmail." -Severity Information
+                    #                         }
+                    #                     }
+                    #                 }
 
-                #                     if ($TestOnly.IsPresent) {
-                #                         #Write-Log -Message "The $bhrWorkEmail employee LastChanged attribute set to extensionAttribute1 as $bhrlastChanged." -Severity Information -Severity Test
-                #                         Write-Log -Message "Executing: Update-MgUser -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged } -UserId $aadObjectID" -Severity Test
-                #                     }
-                #                     else {
-                #                         # Setting the "lastchanged" attribute from BambooHR to ExtensionAttribute1 in AAD
-                #                         # Write-Log -Message "The $bhrWorkEmail employee LastChanged attribute set to extensionAttribute1 as $bhrlastChanged." -Severity Information
-                #                         Write-Log -Message "Executing: Update-MgUser -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged } -UserId $aadObjectID" -Severity Debug
-
-                #                         # TODO
-                #                         Update-MgUser -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged } -UserId $aadObjectID
+                    # Change last name in AAD         
+                    if ($aadLastName -ne $bhrLastName) {
+                        Write-Log -Message " Last name in AAD $aadLastName does not match in BHR $bhrLastName" -Severity Debug
+                        Write-Log -Message " Changing the last name of $bhrWorkEmail from $aadLastName to $bhrLastName." -Severity Debug
+                        if ($TestOnly.IsPresent) {
+                            Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -Surname $bhrLastName" -Severity Test
+                        }
+                        else {
+                            Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -Surname $bhrLastName" -Severity Debug
+                            Update-MgUser -UserId $aadObjectID -Surname $bhrLastName
                         
-                #                         if (!$?) {
-                #                             $err_msg = $Error.exception
-                #                             $err_TargetObject = $error.TargetObject
-                #                             $err_details = $error.ErrorDetails
-                #                             $err_trace = $error.ScriptStackTrace
-
-                #                             Write-Log -Message "Error changing ExtensionAttribute1.`
-                # Exception: $err_msg `n Target object: $err_TargetObject`n Details: $err_details `n StackTrace: $err_trace" -Severity Error
-                #                             $error.Clear()
-                #                         }
-                #                         else {
-                #                             Write-Log -Message "ExtensionAttribute1 changed to: $bhrlastChanged for employee $bhrWorkEmail." -Severity Information
-                #                         }
-                #                     }
-                #                 }
-
-                # Change last name in Azure         
-                if ($aadLastName -ne $bhrLastName) {
-                    Write-Log -Message "Last name in AAD $aadLastName does not match in BHR $bhrLastName" -Severity Debug
-                    Write-Log -Message "Changing the last name of $bhrWorkEmail from $aadLastName to $bhrLastName." -Severity Debug
-                    if ($TestOnly.IsPresent) {
-                        Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -Surname $bhrLastName" -Severity Test
-                    }
-                    else {
-                        Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -Surname $bhrLastName" -Severity Debug
-                        Update-MgUser -UserId $aadObjectID -Surname $bhrLastName
-                        
-                        if (!$?) {
-                            $err_msg = $Error.exception
-                            $err_TargetObject = $error.TargetObject
-                            $err_details = $error.ErrorDetails
-                            $err_trace = $error.ScriptStackTrace
+                            if (!$?) {
+                                $err_msg = $Error.exception
+                                $err_TargetObject = $error.TargetObject
+                                $err_details = $error.ErrorDetails
+                                $err_trace = $error.ScriptStackTrace
                                
-                            Write-Log -Message "Error changing AAD Last Name.`
-Exception: $err_msg `n Target object: $err_TargetObject `n Details: $err_details `nStackTrace: $err_trace" -Severity Error
-                            $error.Clear()
-                        }
-                        else {
-                            Write-Log -Message "Successfully changed the last name of $bhrWorkEmail from $aadLastName to $bhrLastName." -Severity Information
+                                Write-Log -Message "Error changing AAD Last Name.`n Exception: $err_msg `n Target object: $err_TargetObject `n Details: $err_details `nStackTrace: $err_trace" -Severity Error
+                                $error.Clear()
+                            }
+                            else {
+                                Write-Log -Message " Successfully changed the last name of $bhrWorkEmail from $aadLastName to $bhrLastName." -Severity Information
+                            }
                         }
                     }
-                }
             
-                # Change First Name
-                if ($aadfirstName -ne $bhrfirstName) {
-                    Write-Log "AAD First Name $aadfirstName is not equal to BHR First Name $bhrFirstName" -Severity Debug
-                    if ($TestOnly.IsPresent) {
-                        Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -GivenName $bhrFirstName" -Severity Test
-                    }
-                    else {
-                        Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -GivenName $bhrFirstName" -Severity Debug
-                        Update-MgUser -UserId $aadObjectID -GivenName $bhrFirstName
-                        if (!$?) {
-                            $err_msg = $Error.exception
-                            $err_TargetObject = $error.TargetObject
-                            $err_details = $error.ErrorDetails
-                            $err_trace = $error.ScriptStackTrace
-                             
-                            Write-Log -Message "Could not change the First Name of $aadObjectID. Error details below. `
- Exception: $err_msg `n Target object: $err_TargetObject `n Details: $err_details `n StackTrace: $err_trace" -Severity Error
-                            $error.Clear()
-                        }   
+                    # Change First Name in AAD
+                    if ($aadfirstName -ne $bhrfirstName) {
+                        Write-Log "AAD first name '$aadfirstName' is not equal to BHR first name '$bhrFirstName'" -Severity Debug
+                        if ($TestOnly.IsPresent) {
+                            Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -GivenName $bhrFirstName" -Severity Test
+                        }
                         else {
-                            Write-Log -Message "Successfully changed $aadObjectID first name from $aadFirstName to $bhrFirstName." -Severity Information
-                        }       
-                    } 
-                }
+                            Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -GivenName $bhrFirstName" -Severity Debug
+                            Update-MgUser -UserId $aadObjectID -GivenName $bhrFirstName
+                            if (!$?) {
+                                $err_msg = $Error.exception
+                                $err_TargetObject = $error.TargetObject
+                                $err_details = $error.ErrorDetails
+                                $err_trace = $error.ScriptStackTrace
+                             
+                                Write-Log -Message "Could not change the First Name of $aadObjectID. Error details below. `n Exception: $err_msg `n Target object: $err_TargetObject `n Details: $err_details `n StackTrace: $err_trace" -Severity Error
+                                $error.Clear()
+                            }   
+                            else {
+                                Write-Log -Message " Successfully changed $aadObjectID first name from $aadFirstName to $bhrFirstName." -Severity Information
+                            }       
+                        } 
+                    }
            
-                # Change display name
-                if ($aadDisplayname -ne $bhrDisplayName) {
-                    Write-Log -Message "AAD Display Name $aadDisplayname is not equal to BHR $bhrDisplayName" -Severity Debug
-                    if ($TestOnly.IsPresent) {
-                        Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -DisplayName $bhrdisplayName" -Severity Test
-                    }
-                    else {
-                        Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -DisplayName $bhrdisplayName" -Severity Debug
-                        Update-MgUser -UserId $aadObjectID -DisplayName $bhrdisplayName
-
-                        if (!$?) {
-                            $err_msg = $Error.exception
-                            $err_TargetObject = $error.TargetObject
-                            $err_details = $error.ErrorDetails
-                            $err_trace = $error.ScriptStackTrace
-                             
-                            Write-Log -Message "Could not change the Display Name. Error details below. `
- Exception: $err_msg `n Target object: $err_TargetObject `n Details: $err_details `n StackTrace: $err_trace" -Severity Error
-                            $error.Clear()
-                        }# Change display name - Error logging
+                    # Change display name
+                    if ($aadDisplayname -ne $bhrDisplayName) {
+                        Write-Log -Message "AAD Display Name $aadDisplayname is not equal to BHR $bhrDisplayName" -Severity Debug
+                        if ($TestOnly.IsPresent) {
+                            Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -DisplayName $bhrdisplayName" -Severity Test
+                        }
                         else {
-                            Write-Log "Display name $aadDisplayName of $aadObjectID changed to $bhrDisplayName." -Severity Information
-                        }        
-                    }
-                }
+                            Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -DisplayName $bhrdisplayName" -Severity Debug
+                            Update-MgUser -UserId $aadObjectID -DisplayName $bhrdisplayName
 
-                # Change Display Name script block closure
-
-                # Change Email Address
-                if ($aadWorkEmail -ne $bhrWorkEmail) {
-                    Write-Log -Message "aadWorkEmaill $aadWorkEmail is not equal to bhrWorkEmail $bhrWorkEmail"
-                    if ($TestOnly.IsPresent) {
-                        Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -Mail $bhrWorkEmail"
-                    }
-                    else {
-                        Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -Mail $bhrWorkEmail"
-                        Update-MgUser -UserId $aadObjectID -Mail $bhrWorkEmail
-                        
-                        if (!$?) {
-                            $err_msg = $Error.exception
-                            $err_TargetObject = $error.TargetObject
-                            $err_details = $error.ErrorDetails
-                            $err_trace = $error.ScriptStackTrace
+                            if (!$?) {
+                                $err_msg = $Error.exception
+                                $err_TargetObject = $error.TargetObject
+                                $err_details = $error.ErrorDetails
+                                $err_trace = $error.ScriptStackTrace
                              
-                            Write-Log -Message "Error changing Email Address. `
+                                Write-Log -Message " Could not change the Display Name. Error details below. `n Exception: $err_msg `n Target object: $err_TargetObject `n Details: $err_details `n StackTrace: $err_trace" -Severity Error
+                                $error.Clear()
+                            }# Change display name - Error logging
+                            else {
+                                Write-Log " Display name $aadDisplayName of $aadObjectID changed to $bhrDisplayName." -Severity Information
+                            }        
+                        }
+                    }
+
+                    # Change Display Name script block closure
+
+                    # Change Email Address
+                    if ($aadWorkEmail -ne $bhrWorkEmail) {
+                        Write-Log -Message "AAD work email $aadWorkEmail does not match BHR work email $bhrWorkEmail"
+                        if ($TestOnly.IsPresent) {
+                            Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -Mail $bhrWorkEmail"
+                        }
+                        else {
+                            Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -Mail $bhrWorkEmail"
+                            Update-MgUser -UserId $aadObjectID -Mail $bhrWorkEmail
+                            $noAADAccount = $false
+                            if (!$?) {
+                                $err_msg = $Error.exception
+                                $err_TargetObject = $error.TargetObject
+                                $err_details = $error.ErrorDetails
+                                $err_trace = $error.ScriptStackTrace
+                             
+                                Write-Log -Message "Error changing Email Address. `
                         Exception: $err_msg `
                         Target object: $err_TargetObject `
                         Details: $err_details `
                         StackTrace: $err_trace" -Severity Error
-                            $error.Clear()
+                                $error.Clear()
+                            }
+                            else {
+                                # Change Email Address error logging
+                                Write-Log "The current Email Address: $aadworkemail of $aadObjectID has been changed to $bhrWorkEmail. If condition true." -Severity Warning
+                            }             
+                        }
+                    }
+
+                    # Change UserPrincipalName and send the details via email to the User
+                    if ($aadUpn -ne $bhrWorkEmail) {
+                        Write-Log -Message "aadUPN $aadUpn does not match bhrWorkEmail $bhrWorkEmail" -Severity Debug
+                        if ($TestOnly.IsPresent) {
+                            Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -UserPrincipalName $bhrWorkEmail" -Severity Test
                         }
                         else {
-                            # Change Email Address error logging
-                            Write-Log "The current Email Address: $aadworkemail of $aadObjectID has been changed to $bhrWorkEmail. If condition true." -Severity Warning
-                        }             
-                    }
-                }
-
-                # Change UserPrincipalName and send the details via email to the User
-                if ($aadUpn -ne $bhrWorkEmail) {
-                    Write-Log -Message "aadUPN $aadUpn does not match bhrWorkEmail $bhrWorkEmail" -Severity Debug
-                    if ($TestOnly.IsPresent) {
-                        Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -UserPrincipalName $bhrWorkEmail" -Severity Test
-                    }
-                    else {
-                        Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -UserPrincipalName $bhrWorkEmail" -Severity Debug
-                        Update-MgUser -UserId $aadObjectID -UserPrincipalName $bhrWorkEmail
+                            Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -UserPrincipalName $bhrWorkEmail" -Severity Debug
+                            Update-MgUser -UserId $aadObjectID -UserPrincipalName $bhrWorkEmail
                        
-                        if (!$?) {
-                            $err_msg = $Error.exception
-                            $err_TargetObject = $error.TargetObject
-                            $err_details = $error.ErrorDetails
-                            $err_trace = $error.ScriptStackTrace
+                            if (!$?) {
+                                $err_msg = $Error.exception
+                                $err_TargetObject = $error.TargetObject
+                                $err_details = $error.ErrorDetails
+                                $err_trace = $error.ScriptStackTrace
                              
-                            Write-Log -Message "Error changing UPN for $aadObjectID. `
-Exception: $err_msg `n Target object: $err_TargetObject `n Details: $err_details `n StackTrace: $err_trace" -Severity Error
-                            $error.Clear()
-                        } 
-                        else {
-                            Write-Log -Message "Changed the current UPN:$aadUPN of $aadObjectID to $bhrWorkEmail. IF Condition true." -Severity Warning
-                            $params = @{
-                                Message         = @{
-                                    Subject      = "Login details change for $bhrdisplayName"
-                                    Body         = @{
-                                        ContentType = "text"
-                                        Content     = "Hello, `
-`
-Your name has been changed, therefore your user account has also changed. `
-Use your new user name: $bhrWorkEmail `n Your password has not been modified.`n $EmailSignature"
+                                Write-Log -Message " Error changing UPN for $aadObjectID. `n Exception: $err_msg `n Target object: $err_TargetObject `n Details: $err_details `n StackTrace: $err_trace" -Severity Error
+                                $error.Clear()
+                            } 
+                            else {
+                                Write-Log -Message " Changed the current UPN:$aadUPN of $aadObjectID to $bhrWorkEmail. IF Condition true." -Severity Warning
+                                $params = @{
+                                    Message = @{
+                                        Subject       = "Login changed for $bhrdisplayName"
+                                        Body          = @{
+                                            ContentType = "HTML"
+                                            Content     = "
+<p>Your name has been changed in the HR system, which has caused your user account has also changed.</p><ui><li>Use your new user name: $bhrWorkEmail</li><li>Your password has not been modified.</li></ul><br/><p>$EmailSignature</p>"
+                                        }
+                                        ToRecipients  = @(
+                                            @{
+                                                EmailAddress = @{
+                                                    Address = $bhrWorkEmail
+                                                }
+                                            }
+                                        )
+                                        CCRecipients  = @(
+                                            @{
+                                                EmailAddress = @{
+                                                    Address = $bhrSupervisorEmail
+                                                }
+                                            }
+                                        )
+                                        BCCRecipients = @(
+                                            @{
+                                                EmailAddress = @{
+                                                    Address = $NotificationEmailAddress
+                                                }
+                                            }
+                                            @{
+                                                EmailAddress = @{
+                                                    Address = $AdminEmailAddress
+                                                }        
+                                            }
+                                        )
                                     }
-                                    ToRecipients = @(
-                                        @{
-                                            EmailAddress = @{
-                                                Address = $bhrWorkEmail
-                                            }
-                                        }
-                                    )
-                                    CCRecipients = @(
-                                        @{
-                                            EmailAddress = @{
-                                                Address = $AdminEmailAddress, $NotificationsEmailAddress, $bhrSupervisorEmail
-                                            }
-                                        }
-                                    )
+                                    SaveToSentItems = "True"
                                 }
-                                SaveToSentItems = "True"
-                            }
-
+                                
                             Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress
                         }
                     }
                 }
-            
 
             }   
+
             # CREATE ACCOUNT FOR NEW EMPLOYEE   
             if (($noAADAccount -eq $true) -and ($bhrAccountEnabled -eq $true)) {
                 Write-Log -Message "No AAD account exist but employee in bhr is $bhrAccountEnabled)" -Severity Debug
-            
+
                 $PasswordProfile = @{
                     Password = (Get-NewPassword)
                 }
+
                 $error.clear() 
             
                 if ($TestOnly.IsPresent) {
                     # Write logging here
-                    Write-Log -Message "Executing New-MgUser `
-                                -Department $bhrdepartment `
-                                -EmployeeId $bhremployeeNumber `
-                                -JobTitle $bhrjobTitle `
-                                -CompanyName $CompanyName `
-                                -Surname $bhrlastName `
-                                -GivenName $bhrfirstName `
-                                -DisplayName $bhrdisplayName `
-                                -AccountEnabled `
-                                -Mail $bhrWorkEmail `
-                                -EmployeeHireDate $bhrHireDate `
-                                -UserPrincipalName $bhrWorkEmail `
-                                -PasswordProfile $PasswordProfile `
-                                -MailNickname ($bhrWorkEmail -replace '@', '' -replace $companyEmailDomain, '') `
-                                -UsageLocation $UsageLocation `
-                                -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged " -Severity Debug
+                    Write-Log -Message "Executing New-MgUser -EmployeeId $bhremployeeNumber -Department $bhrDepartment -CompanyName $CompanyName -Surname $bhrlastName -GivenName $bhrfirstName -DisplayName $bhrdisplayName -AccountEnabled -Mail $bhrWorkEmail -OfficeLocation $bhrOfficeLocation `
+                                -EmployeeHireDate $bhrHireDate -UserPrincipalName $bhrWorkEmail -PasswordProfile $PasswordProfile -JobTitle $bhrjobTitle -MailNickname ($bhrWorkEmail -replace '@', '' -replace $companyEmailDomain, '' ) -UsageLocation $UsageLocation -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged} " -Severity Test
                                 
                 }
                 else {
-                    # Create AAD account, as it doesn't have one, if user hire date is less than 14 days in the future, or is in the past
-                    Write-Log -Message "$bhrWorkEmail does not have an AAD account and hire date is less than 14 days from present time or in the past." -Severity Information
+                    # Create AAD account, as it doesn't have one, if user hire date is less than $DaysAhead days in the future, or is in the past
+                    Write-Log -Message "$bhrWorkEmail does not have an AAD account and hire date is less than $DaysAhead days from present time or in the past." -Severity Information
                     
-                    Write-Log -Message "Executing New-MgUser -EmployeeId $bhremployeeNumber `
-                                -CompanyName $CompanyName -Surname $bhrlastName `
-                                -GivenName $bhrfirstName -DisplayName $bhrdisplayName `
-                                -AccountEnabled -Mail $bhrWorkEmail `
-                                -EmployeeHireDate $bhrHireDate -UserPrincipalName $bhrWorkEmail `
-                                -PasswordProfile $PasswordProfile `
-                                -MailNickname ($bhrWorkEmail -replace '@', '' -replace $companyEmailDomain, '' ) `
-                                -UsageLocation $UsageLocation `
-                                -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged " -Severity Debug
+                    Write-Log -Message "Executing New-MgUser -EmployeeId $bhremployeeNumber -Department $bhrDepartment -CompanyName $CompanyName -Surname $bhrlastName -GivenName $bhrfirstName -DisplayName $bhrdisplayName -AccountEnabled -Mail $bhrWorkEmail -OfficeLocation $bhrOfficeLocation `
+                                -EmployeeHireDate $bhrHireDate -UserPrincipalName $bhrWorkEmail -PasswordProfile $PasswordProfile -JobTitle $bhrjobTitle -MailNickname ($bhrWorkEmail -replace '@', '' -replace $companyEmailDomain, '' ) -UsageLocation $UsageLocation -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged }" -Severity Debug
             
-                    New-MgUser -EmployeeId $bhrEmployeeNumber `
-                        -CompanyName $CompanyName -Surname $bhrlastName `
-                        -GivenName $bhrfirstName -DisplayName $bhrdisplayName `
-                        -AccountEnabled -Mail $bhrWorkEmail `
-                        -EmployeeHireDate $bhrHireDate -UserPrincipalName $bhrWorkEmail `
-                        -PasswordProfile $PasswordProfile `
-                        -MailNickname ($bhrWorkEmail -replace '@', '' -replace $companyEmailDomain, '') `
-                        -UsageLocation $UsageLocation `
-                        -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged 
+                    New-MgUser -EmployeeId $bhrEmployeeNumber -Department $bhrDepartment -CompanyName $CompanyName -Surname $bhrlastName -GivenName $bhrfirstName -DisplayName $bhrdisplayName `
+                        -AccountEnabled -Mail $bhrWorkEmail -OfficeLocation $bhrOfficeLocation -EmployeeHireDate $bhrHireDate -UserPrincipalName $bhrWorkEmail -PasswordProfile $PasswordProfile `
+                        -JobTitle $bhrjobTitle -MailNickname ($bhrWorkEmail -replace '@', '' -replace $companyEmailDomain, '') `
+                        -UsageLocation $UsageLocation -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged }
+                    
+                    # Since we are setting up a new account lets use the image they have in there profile to assign to their account
+                    Write-Log -Message "Retrieving user photo from BambooHR..." -Severity Information
+                    $bhrEmployeePhotoUri = "$($bhrRootUri)/employees/$bhrEmployeeId/photo/large"
+                    $profilePicPath = Join-Path -Path $env:temp -ChildPath "bhr-$($bhrEmployeeId).jpg"
+                    $aadProfilePicPath = Join-Path -Path $env:temp -ChildPath "aad-$($bhrEmployeeId).jpg"
+                    Remove-Item -Path $profilePicPath -ErrorAction SilentlyContinue -Force | Out-Null
+                    Write-Log -Message "Executing: Invoke-RestMethod -Uri $bhrRep -Method POST -Headers $headers -ContentType 'application/json' -OutFile $profilePicPath" -Severity Debug
+                    $null = Invoke-RestMethod -Uri $bhrEmployeePhotoUri -Method GET -Headers $headers -ContentType 'application/json' -OutFile $profilePicPath -ErrorAction SilentlyContinue | Out-Null
+
+                    if (Test-Path $profilePicPath -PathType Leaf -ErrorAction SilentlyContinue) { 
+                        Write-Log "Reconnecting to mggraph..." -Severity Debug
+                        $null = Disconnect-Mggraph | Out-Null
+                        Connect-MgGraph -TenantId $TenantID -CertificateThumbprint $AADCertificateThumbprint -ClientId $AzureClientAppId | Out-Null
+                        Write-Log "Updating user account with BambooHR profile picture..." -Severity Information
+                        $user = Get-MgUser -UserId $bhrWorkEmail -ErrorAction SilentlyContinue
+                        Start-Sleep 120
+                        Write-Log "Executing:  Set-MgUserPhotoContent -UserId $($user.Id) -InFile $profilePicPath" -Severity Debug
+                        Get-MgUserPhotoContent -UserId $user.Id -OutFile $aadProfilePicPath -ErrorAction SilentlyContinue
+                        Set-MgUserPhotoContent -UserId $user.Id -InFile $profilePicPath -ErrorAction Continue
+                        Write-Log "Executing: Remove-Item -Path $profilePicPath -ErrorAction SilentlyContinue | Out-Null" -Severity Debug
+                        #Remove-Item -Path $profilePicPath -ErrorAction SilentlyContinue -Force | Out-Null
                     }
-                            
                     if ($? -eq $true) {
                         
                         if ([string]::IsNullOrWhiteSpace($bhrSupervisorEmail) -eq $false) {
@@ -1169,50 +1231,59 @@ Use your new user name: $bhrWorkEmail `n Your password has not been modified.`n 
                             Set-MgUserManagerByRef -UserId $bhrWorkEmail -BodyParameter $NewManager
                             $params = @{
                                 Message         = @{
-                                    Subject      = "User creation automation: $bhrdisplayName"
-                                    Body         = @{
-                                        ContentType = "text"
-                                        Content     = "Hello, `n`t New employee user account created for $bhrDisplayName.`
-    Please review the new user setup guide for additional information.`n`t User name: $bhrWorkEmail `n`t Password: $($PasswordProfile.Values) `n `n $EmailSignature"
+                                    Subject       = "User account created for: $bhrdisplayName"
+                                    Body          = @{
+                                        ContentType = "html"
+                                        Content     = "<br/><br/><p>A new user account was created for $bhrDisplayName.</p><p>Please review the <a href='https://geckogreen.sharepoint.com/sites/Helpdesk/SitePages/Setting-up-your-new-computer.aspx'>new user setup guide</a> for additional information.<ul><li>User name: $bhrWorkEmail</li><li>Password: $($PasswordProfile.Values)</li></ul><br/><p>$EmailSignature</p>"
                                     }
-                                    ToRecipients = @(
+                                    ToRecipients  = @(
                                         @{
                                             EmailAddress = @{
                                                 Address = $bhrSupervisorEmail
                                             }
                                         }
                                     )
-                                    CcRecipients = @(
+                                    BCCRecipients = @(
                                         @{
                                             EmailAddress = @{
-                                                Address = $AdminEmailAddress
+                                                Address = $HelpDeskEmailAddress
                                             }
                                         }
                                     )
                                 }
                                 SaveToSentItems = "True"
                             }
+                            Write-Log -Message "Sending $bhrSupervisorEmail new employee information for $bhrDisplayName in email." -Severity Information
+                            Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress 
                         }
                         else {
                             $params = @{
                                 Message         = @{
-                                    Subject      = "User creation automation: $bhrdisplayName"
-                                    Body         = @{
-                                        ContentType = "text"
-                                        Content     = "Hello, `n`t New employee user account created for $bhrDisplayName.`
-    No manager account is currently active for this account so this info is being sent to the default location.`n
-    Please reference the new user setup guide for additional information.`n`t User name: $bhrWorkEmail `n`t Password: $($PasswordProfile.Values) `n $EmailSignature"
+                                    Subject       = "User creation automation: $bhrdisplayName"
+                                    Body          = @{
+                                        ContentType = "html"
+                                        Content     = "<br/><p>New employee user account created for $bhrDisplayName. No manager account is currently active for this account so this info is being sent to the default location.`
+                                        <p>Please review the <a href='https://geckogreen.sharepoint.com/sites/Helpdesk/SitePages/Setting-up-your-new-computer.aspx'>new user setup guide</a> for additional information.<ul><li>User name: $bhrWorkEmail</li><li>Password: $($PasswordProfile.Values)</li></ul></p><p>$EmailSignature</p>"
                                     }
-                                    ToRecipients = @(
+                                    ToRecipients  = @(
                                         @{
                                             EmailAddress = @{
                                                 Address = $AdminEmailAddress
                                             }
                                         }
                                     )
+                                    BCCRecipients = @(
+                                        @{
+                                            EmailAddress = @{
+                                                Address = $HelpDeskEmailAddress
+                                            }
+                                        }
+                                    )
                                 }
                                 SaveToSentItems = "True"
                             }
+                            Write-Log -Message "Sending new employee information to default notification email because no manager was defined." -Severity Information
+                            Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress 
                         }
 
                         #Assigning the user to BambooHR enterprise app
@@ -1222,13 +1293,10 @@ Use your new user name: $bhrWorkEmail `n Your password has not been modified.`n 
                         #    -AppRoleId a8972ac9-2341-4879-9028-2a9d979844a0
             
                         # Send mail with credentials of the newly created user
-                        
-            
-                        Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress 
-            
+
                     }
                     else {
-                        # If "User account creation succeded" closure
+                        # If "User account creation succeeded" closure
                         $creationerror = $error
                         $full_Error_Details = $creationerror | Select-Object *
                         $creationerror_exception = $creationerror.Exception.Message
@@ -1239,18 +1307,23 @@ Use your new user name: $bhrWorkEmail `n Your password has not been modified.`n 
                         Write-Log -Message "Account $bhrWorkEmail creation failed. New-Mguser cmdlet returned error. `n $full_Error_Details"-Severity Error
                         $params = @{
                             Message         = @{
-                                Subject      = "FAILURE: User creation automation $bhrdisplayName"
+                                Subject      = "BhrAadSync error: User creation automation $bhrdisplayName"
                                 Body         = @{
-                                    ContentType = "text"
-                                    Content     = "Hello, `
-            `
-            Account creation for user: $bhrWorkEmail has failed. Please check the log: $logFileName for further details. Error message summary below. `
-            Error Message: $creationerror_exception `n Error Category: $creationerrorCategory `n Error ID: $creationerror_errID `n Stack: $creationerrorStack `n $EmailSignature"
+                                    ContentType = "html"
+                                    Content     = "<p>Hello,</p><br/><p>Account creation for user: $bhrWorkEmail has failed. Please check the log: $logFileName for further details. The error information is  below. `
+<ul><li>Error Message: $creationerror_exception</li><li>Error Category: $creationerrorCategory</li><li>Error ID: $creationerror_errID</li><li>Stack: $creationerrorStack</li></ul></p><p>$EmailSignature</p>"
                                 }
                                 ToRecipients = @(
                                     @{
                                         EmailAddress = @{
                                             Address = $AdminEmailAddress
+                                        }
+                                    }
+                                )
+                                CCRecipients = @(
+                                    @{
+                                        EmailAddress = @{
+                                            Address = $NotificationEmailAddress
                                         }
                                     }
                                 )
@@ -1261,45 +1334,55 @@ Use your new user name: $bhrWorkEmail `n Your password has not been modified.`n 
                         # Send Mail Message parameters definition closure
                         Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress
             
-                    }# else "User account creation failed" closure
+                    }
                 }
             }                    
         }
         else {
-            # If Hire Date is less than 14 days in the future or in the past closure
-            # The user account does not need to be created as it does not satisfy the condition of the HireDate being 14 days or less in the future
-            Write-Log -Message "The Employee $bhrWorkEmail hire date is more than 14 days in the future. Will be created when HireDate is 14 days or less in the future." -Severity Information
-        }
-    }
-
-
-
-}
-
-
-$params = @{
-    Message         = @{
-        Subject      = "$($logFileName.Split(".")[0])"
-        Body         = @{
-            ContentType = "text"
-            Content     = "The following was completed by the sync. `n $Script:LogContent `n $EmailSignature"
-        }
-        ToRecipients = @(
-            @{
-                EmailAddress = @{
-                    Address = $AdminEmailAddress
-                }
+            # If Hire Date is less than $days days in the future or in the past closure
+            # The user account does not need to be created as it does not satisfy the condition of the HireDate being $DaysAhead days or less in the future
+            if ($bhrAccountEnabled) {
+                Write-Log -Message "The Employee $bhrWorkEmail hire date is more than $DaysAhead days in the future." -Severity Information
             }
-        )
+            else {
+                Write-Log -Message "The Employee $bhrWorkEmail has been terminated and will not be added." -Severity Debug
+            }
+            
+        }
     }
-    SaveToSentItems = "True"
+}
 }
 
-Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress
+Write-Log -Message "`nCompleted sync at $(Get-Date) and ran for $($runtime.Totalseconds) seconds" -Severity Information
 
-# RUNTIME BLOCK CLOSURE 
-$runtime_seconds = $runtime.TotalSeconds
-Write-Log -Message "Total time the script ran: $runtime_seconds" -Severity Information
+if ($TestOnly.IsPresent -eq $false ) {
+    $params = @{
+        Message         = @{
+            Subject      = "BambooHR to AAD Sync Results"
+            Body         = @{
+                ContentType = "html"
+                Content     = "<p>BambooHR to AAD sync ran with the following results:</p><br/>$Script:LogContent<br/><br/>"
+            }
+            ToRecipients = @(
+                @{
+                    EmailAddress = @{
+                        Address = $AdminEmailAddress
+                    }
+                }
+            )
+            CCRecipients = @(
+                @{
+                    EmailAddress = @{
+                        Address = $NotificationEmailAddress
+                    }
+                }
+            )
+        }
+        SaveToSentItems = "True"
+    }
+
+    Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress
+}
 Disconnect-MgGraph | Out-Null
 Exit
 #Script End
