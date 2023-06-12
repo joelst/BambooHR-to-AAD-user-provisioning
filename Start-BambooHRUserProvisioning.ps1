@@ -79,13 +79,13 @@ param (
     $BHRCompanyName,
     [Parameter()]
     [string]
-    $CompanyName ,
+    $CompanyName,
     [Parameter()]
     [string]
     $TenantId,
     [Parameter()]
     [string]
-    $AADCertificateThumbprint ,
+    $AADCertificateThumbprint,
     [parameter()]
     [string]
     $AzureClientAppId,
@@ -110,6 +110,9 @@ param (
     [parameter()]
     [string]
     $EmailSignature = "`n Regards, `n`n $CompanyName Automated User Management `n`n`nFor additional information, please review the IT FAQ.`n",
+    [parameter()]
+    [string]
+    $HelpDeskFAQText = "Please review the <a href='https://bing.com'>new user setup guide</a> for additional information.",
     [parameter()]
     [switch]
     $TestOnly,
@@ -638,13 +641,17 @@ $runtime = Measure-Command -Expression {
                                                     Address = $bhrSupervisorEmail
                                                 }
                                             }
-                                        )
-                                        BCCRecipients = @(
-                                            @{
-                                                EmailAddress = @{
-                                                    Address = $NotificationEmailAddress
-                                                }
+                                        
+                                        @{
+                                            EmailAddress = @{
+                                                Address = $NotificationEmailAddress
                                             }
+                                        }
+                                        @{
+                                            EmailAddress = @{
+                                                Address = $AdminEmailAddress
+                                            }        
+                                        }
                                         )
                                     }
                                     SaveToSentItems = "True"
@@ -857,7 +864,7 @@ $runtime = Measure-Command -Expression {
                                     $error.Clear()
                                 }
                                 else {
-                                    Write-Log -Message " The ID $bhremployeeNumber has been set to $bhrWorkEmail AAD account. IF condition result is True." -Severity Warning
+                                    Write-Log -Message " The ID $bhremployeeNumber has been set to $bhrWorkEmail AAD account." -Severity Warning
                                     $error.Clear()
                                 }
                             }
@@ -1094,7 +1101,7 @@ $runtime = Measure-Command -Expression {
                             }
                             else {
                                 # Change Email Address error logging
-                                Write-Log "The current Email Address: $aadworkemail of $aadObjectID has been changed to $bhrWorkEmail. If condition true." -Severity Warning
+                                Write-Log "The current Email Address: $aadworkemail of $aadObjectID has been changed to $bhrWorkEmail." -Severity Warning
                             }             
                         }
                     }
@@ -1119,14 +1126,14 @@ $runtime = Measure-Command -Expression {
                                 $error.Clear()
                             } 
                             else {
-                                Write-Log -Message " Changed the current UPN:$aadUPN of $aadObjectID to $bhrWorkEmail. IF Condition true." -Severity Warning
+                                Write-Log -Message " Changed the current UPN:$aadUPN of $aadObjectID to $bhrWorkEmail." -Severity Warning
                                 $params = @{
                                     Message = @{
                                         Subject       = "Login changed for $bhrdisplayName"
                                         Body          = @{
                                             ContentType = "HTML"
                                             Content     = "
-<p>Your name has been changed in the HR system, which has caused your user account has also changed.</p><ui><li>Use your new user name: $bhrWorkEmail</li><li>Your password has not been modified.</li></ul><br/><p>$EmailSignature</p>"
+<p>Your email address was changed in the $CompanyName BambooHR. Your user account has been changed accordingly.</p><ui><li>Use your new user name: $bhrWorkEmail</li><li>Your password has not been modified.</li></ul><br/><p>$EmailSignature</p>"
                                         }
                                         ToRecipients  = @(
                                             @{
@@ -1234,7 +1241,7 @@ $runtime = Measure-Command -Expression {
                                     Subject       = "User account created for: $bhrdisplayName"
                                     Body          = @{
                                         ContentType = "html"
-                                        Content     = "<br/><br/><p>A new user account was created for $bhrDisplayName.</p><p>Please review the <a href='https://geckogreen.sharepoint.com/sites/Helpdesk/SitePages/Setting-up-your-new-computer.aspx'>new user setup guide</a> for additional information.<ul><li>User name: $bhrWorkEmail</li><li>Password: $($PasswordProfile.Values)</li></ul><br/><p>$EmailSignature</p>"
+                                        Content     = "<br/><br/><p>A new user account was created for $bhrDisplayName.</p><p> $HelpDeskFAQText <ul><li>User name: $bhrWorkEmail</li><li>Password: $($PasswordProfile.Values)</li></ul><br/><p>$EmailSignature</p>"
                                     }
                                     ToRecipients  = @(
                                         @{
@@ -1246,8 +1253,13 @@ $runtime = Measure-Command -Expression {
                                     BCCRecipients = @(
                                         @{
                                             EmailAddress = @{
-                                                Address = $HelpDeskEmailAddress
+                                                Address = $NotificationEmailAddress
                                             }
+                                        }
+                                        @{
+                                            EmailAddress = @{
+                                                Address = $AdminEmailAddress
+                                            }        
                                         }
                                     )
                                 }
@@ -1263,7 +1275,7 @@ $runtime = Measure-Command -Expression {
                                     Body          = @{
                                         ContentType = "html"
                                         Content     = "<br/><p>New employee user account created for $bhrDisplayName. No manager account is currently active for this account so this info is being sent to the default location.`
-                                        <p>Please review the <a href='https://geckogreen.sharepoint.com/sites/Helpdesk/SitePages/Setting-up-your-new-computer.aspx'>new user setup guide</a> for additional information.<ul><li>User name: $bhrWorkEmail</li><li>Password: $($PasswordProfile.Values)</li></ul></p><p>$EmailSignature</p>"
+                                        <p> $HelpDeskFAQText <ul><li>User name: $bhrWorkEmail</li><li>Password: $($PasswordProfile.Values)</li></ul></p><p>$EmailSignature</p>"
                                     }
                                     ToRecipients  = @(
                                         @{
@@ -1272,11 +1284,16 @@ $runtime = Measure-Command -Expression {
                                             }
                                         }
                                     )
-                                    BCCRecipients = @(
+                                    CCRecipients = @(
                                         @{
                                             EmailAddress = @{
-                                                Address = $HelpDeskEmailAddress
+                                                Address = $NotificationEmailAddress
                                             }
+                                        }
+                                        @{
+                                            EmailAddress = @{
+                                                Address = $AdminEmailAddress
+                                            }        
                                         }
                                     )
                                 }
