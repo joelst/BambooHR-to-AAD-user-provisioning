@@ -17,6 +17,14 @@ What is different about this from the original?
 
 ## Latest changes
 
+- Fixed errors I introduced around name changes.
+- If an employee is not active and their account is disabled don't keep synchronizing their department and other info. Also, set the department to "" when they are deactivated.
+- Added days ahead parameter to set the number of days to look ahead for new hires.
+- Changed email format to html to allow for improved formatting and clickable URLs.
+
+
+### March 2023 changes
+
 - Created parameters for common information needed.
 - Updated password creation with a function that avoids characaters that are difficult to differentiate (like 0,O and 1,l,I) and avoids any characters that might cause PowerShell issues (like $ and `)
 - The API key from BambooHR is automatically formatted, you can simply provide the key as-is from BambooHR
@@ -33,6 +41,8 @@ What is different about this from the original?
 
 ## Known issues
 
+- Started work on importing the user's picture from BambooHR into AAD when the account is created. This does not work yet.
+- Started work to build into an Azure Function, however this has not been checked in yet.
 - Broke updating of the ExtensionAttribute1 with the LastUpdate from BHR. It does not even try to do this.
 - User offboarding process has a couple issues and needs to be retested.
 - There are a number of areas where the process can be streamlined and _may be_ addressed in the future.
@@ -63,7 +73,6 @@ This content is provided *AS IS* with *no* guarantees or assumptions of quality,
 - Friends don't let friends run untested directory scripts in production.
 - Don't take any wooden nickels.
 
-
 The script will extract the employee data from BambooHR and for each user and will run one of the following processes:
 1. Attribute corrections - if the user has an existing account , and is an active employee, and, the last changed time in Azure AD differs from BambooHR, then this first block will compare each of the AzAD User object attributes with the data extracted from BHR and correct them if necessary
 2. Name changed - If the user has an existing account, but the name does not match with the one from BHR, then, this block will run and correct the user Name, UPN,	emailaddress
@@ -71,35 +80,36 @@ The script will extract the employee data from BambooHR and for each user and wi
 
 Variables usage description:
 
-- $bhrDisplayName - The Display Name of the user in BambooHR
-- $bhrLastName - The Last name of the user in BambooHR
-- $bhrFirstName - The First Name of the user in BambooHR
-- $bhrLastChanged - The Date when the user's details were last changed in BambooHR
-- $bhrHireDate - The Hire Date of the user set in BambooHR
-- $bhrEmployeeNumber - The EmployeeID of the user set in BambooHR
-- $bhrJobTitle - The Job Title of the user set in BambooHR
-- $bhrDepartment - The Department of the user set in BambooHR
-- $bhrSupervisorEmail - The Manager of the user set in BambooHR
-- $bhrWorkEmail - The company email address of the user set in BambooHR
-- $bhrEmploymentStatus - The current status of the employee: Active, Terminated and if contains "Suspended" is in "maternity leave"
-- $bhrStatus - The employee account status in BambooHR: Valid values are "Active" and "Inactive"
+- Bamboo HR related variables:
+  - $bhrDisplayName - The Display Name of the user in BambooHR
+  - $bhrLastName - The Last name of the user in BambooHR
+  - $bhrFirstName - The First Name of the user in BambooHR
+  - $bhrLastChanged - The Date when the user's details were last changed in BambooHR
+  - $bhrHireDate - The Hire Date of the user set in BambooHR
+  - $bhrEmployeeNumber - The EmployeeID of the user set in BambooHR
+  - $bhrJobTitle - The Job Title of the user set in BambooHR
+  - $bhrDepartment - The Department of the user set in BambooHR
+  - $bhrSupervisorEmail - The Manager of the user set in BambooHR
+  - $bhrWorkEmail - The company email address of the user set in BambooHR
+  - $bhrEmploymentStatus - The current status of the employee: Active, Terminated and if contains "Suspended" is in "maternity leave"
+  - $bhrStatus - The employee account status in BambooHR: Valid values are "Active" and "Inactive"
 
-- $aadUPN_OBJdetails - All AzAD user object attributes extracted via WorkEmail
-- $aadEID_OBJdetails - All AzAD user object attributes extracted via EmployeeID
-- $aadWorkemail - UserPrincipalName/EmailAddress of the AzureAD user account - string
-- $aadJobTitle - Job Title of the AzureAd user account - string
-- $aadDepartment - Department of the AzureAD user account - string
-- $aadStatus - Login ability status of the AzureAD user account - boolean -can be True(Account is Active) or False(Account is Disabled)
-- $aadEmployeeNumber - Employee Number set on AzureAD user account(assigned by HR upon hire) - string
-- $aadSupervisorEmail - Direct Manager Name set on the AzureAD user account
-- $aadDisplayname - The Display Name set on the AzureAD user account - string
-- $aadFirstName - The First Name set on the AzureAD user account - string
-- $aadLastName - The Last Name set on the AzureAD user account - string
-- $aadCompanyName - The company Name set on the AzureAD user account - string - Always will be "Tec Software Solutions"
-- $aadHireDate - The Hire Date set on the AzureAD user account - string
+- AAD related variables:
+  - $aadUPN_OBJdetails - All AzAD user object attributes extracted via WorkEmail
+  - $aadEID_OBJdetails - All AzAD user object attributes extracted via EmployeeID
+  - $aadWorkemail - UserPrincipalName/EmailAddress of the AzureAD user account - string
+  - $aadJobTitle - Job Title of the AzureAd user account - string
+  - $aadDepartment - Department of the AzureAD user account - string
+  - $aadStatus - Login ability status of the AzureAD user account - boolean -can be True(Account is Active) or False(Account is Disabled)
+  - $aadEmployeeNumber - Employee Number set on AzureAD user account(assigned by HR upon hire) - string
+  - $aadSupervisorEmail - Direct Manager Name set on the AzureAD user account
+  - $aadDisplayname - The Display Name set on the AzureAD user account - string
+  - $aadFirstName - The First Name set on the AzureAD user account - string
+  - $aadLastName - The Last Name set on the AzureAD user account - string
+  - $aadCompanyName - The company Name set on the AzureAD user account - string - Always will be "Tec Software Solutions"
+  - $aadHireDate - The Hire Date set on the AzureAD user account - string
 
-
-## Major function and logical operations that take place in the script:
+## Major functions and logical operations that take place in the script:
 
 Initiate Script run time capture
 
@@ -115,15 +125,15 @@ Connect to AzAd via graph module
 - If connection failure -> Send alert + terminate script
 
 
+## Out of date 3/31/23
 
-
-## Out of date 3/31/23.	
 $employees - system.array custom object containing an array of "user attributes" in blocks(arrays). Each block(array) represents 1 user and their details: Firstname,Lastname,email address, etc. The script cycles throug each block, and performs operations for each user attributes within the particular block of data. FOR EACH block of data within the variable $employees, representing 1 user with all its attributes, perform the below operations. 
+
 There are 3 major script blocks: 
+
 1. User attribute correction, 
 2. User attribute correction for name changing situations, 
 3. User account creation
-
 
 For each of the returned employees:
 
