@@ -1,7 +1,7 @@
 # BambooHR to Azure AD user provisioning
 User provisioning from BambooHR to AAD
 
-## Updated 3/31/2023
+## Updated 7/15/2023
 This is a fork of the AMAZING work done by [PaulTony BHR-to-AzAd-user-Provisioning](https://github.com/PaulTony-coocoo/BHR-to-AzAD-user-provisioning). Their work saved me many hours having to put together this myself and I'm very grateful!
 
 Anyone is free to take what is here and I will happily contribute my changes back to the original author, if they find my ideas worthy. 
@@ -27,6 +27,9 @@ What is different about this from the original?
 - Moved most screen output to Verbose channel. If you are troubleshooting, run with -Verbose to see details.
 - Fixed a bug in logging where the wrong time was being logged. You can see the fix in the incorrectly named [Original_BambooHr_User_Provisioning.ps1](./Original_BambooHR_User_Provisioning.ps1) as it has a couple small changes from the [upstream version](https://github.com/PaulTony-coocoo/BHR-to-AzAD-user-provisioning/blob/main/GENERALIZED_AUTO_USER_PROVISIONING.ps1).
 - Added NotificationEmailAddress to copy all messages to so that HR or IT can keep an eye what changed process. This will give them the information needed to track down when a user's information changed.
+- Added Sync-GroupMailboxDelegation function to set shared mailbox permissions. This need some work to upcate to latest APIs, however included because I am using it elsewhere.
+- Added Photo Sync, when a new user is created it will attempt to add the photo from Bamboo to AAD. This is not kept in sync afterward, just on initial creation.
+- Added Teams Adaptive Card logging. This is very simple and ugly now, but moved from sending an email to the webhook. This should get better in the future.
 
 ## Known issues
 
