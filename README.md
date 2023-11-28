@@ -86,8 +86,7 @@ This is part of Bamboo HR and Entra Id (Azure Active Directory) integration proc
 
 3. Required modules: MGGraph 2.0, ExchangeOnlineManagement, PSTeams
 
-## IMPORTANT: This is a sample solution and should be used by those comfortable testing, retesting, and validating before **thinking** about using it in production. 
-This content is provided *AS IS* with *no* guarantees or assumptions of quality, functionality, or support. 
+> **IMPORTANT:** This is a sample solution and should be used by those comfortable testing, retesting, and validating before **thinking** about using it in production. This content is provided *AS IS* with *no* guarantees or assumptions of quality, functionality, or support. 
 
 - You are responsible to comply with all applicable laws and regulations. 
 - With great power comes great responsibility.
