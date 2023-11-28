@@ -1,7 +1,8 @@
 # BambooHR to Azure AD user provisioning
 User provisioning from BambooHR to Entra Id formerly known as Azure Active Directory (AAD)
 
-## Updated November 2023
+## Introduction
+
 This is a fork of the AMAZING work done by [PaulTony BHR-to-AzAd-user-Provisioning](https://github.com/PaulTony-coocoo/BHR-to-AzAD-user-provisioning). Their work saved me many hours having to put together this myself and I'm very grateful!
 
 Anyone is free to take what is here and I will happily contribute my changes back to the original author, if they find my ideas worthy. 
@@ -14,7 +15,11 @@ What is different about this from the original?
 4. My project is for a cloud-first Entra Id (AAD) organization that but has on some hybrid user objects. This has lead to issues with some attributes not being writable.
 5. I've got a _little OCD_ when it comes to silly things like variable names. Although I _really_ tried to fight my irrational desire to change them, I failed. No, there wasn't anything wrong with the original ones, just try explaining that to my OCD. 
 
-## Latest changes
+## Changes & Updates
+
+This section will keep track of changes made over time.
+
+### November 2023 changes
 
 - Improvements to make running in Azure Automation easier.
 - Minor documentation and verbiage changes to messages.
@@ -22,7 +27,7 @@ What is different about this from the original?
 - Sprinkle in some Entra Id renaming into user text.
 - Now removes the Entra Id Manager when user is terminated.
 
-## July 2023 changes
+### July 2023 changes
 
 - Fixed errors I introduced around name changes.
 - If an employee is not active and their account is disabled don't keep synchronizing their department and other info. Also, set the department to "" when they are deactivated.
@@ -48,19 +53,29 @@ What is different about this from the original?
 
 ## Known issues
 
-- Broke updating of the ExtensionAttribute1 with the LastUpdate from BHR. It does not even try to do this.
+- ExtensionAttribute1 with the LastUpdate from BHR no longer works.
 - User off boarding process may have a couple issues that needs to be retested.
 - There are a number of areas where the process can be streamlined and _may be_ addressed in the future.
 - Entra Id accounts are disabled and not deleted. You will need to either add logic to automatically delete accounts or do this manually.
 
+## Future ideas
+
 If you have suggestions or questions, feel free to reach out. 
+
+- Add off boarding steps for things like:
+  - One Drive for Business data access
+  - Transfer group ownership
+  - Deleting disabled accounts after suitable waiting period.
+  - Other suggestions
+
+
+## Getting started
 
 This is part of Bamboo HR and Entra Id (Azure Active Directory) integration process. This will make sure employees have Entra Id accounts. This does not create or update on premises Active Directory Domain Services accounts. 
 
-## Setting up this application to run unattended (like as an Azure Function)
-
 1. Create Azure AD Enterprise application for unattended auth using a certificate for Azure AD object management and Exchange Online management
  - Mail.Send
+
 2. Set the following variables: 
  - BambooHRApiKey - API key created in BambooHR
  - AdminEmailAddress - Email address to receive email alerts
