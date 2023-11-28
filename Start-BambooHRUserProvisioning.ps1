@@ -1,29 +1,28 @@
-#Requires -Module ExchangeOnlineManagement,Microsoft.Graph
+#Requires -Module ExchangeOnlineManagement,PSTeams,Microsoft.Graph.Users,Microsoft.Graph.Authentication
 <#
 
 IMPORTANT: This is a sample solution and should be used by those comfortable testing and retesting and validating before using it in production. 
-All content is provided AS IS with no guarantees or assumptions of quality of functionality. 
+All content is provided AS IS with no guarantees or assumptions of quality or functionality. 
 
 If you are using employee information there is much that can go wrong! 
 
-You are responsible for complying with all applicable laws and regulations. 
-With great power comes great responsibility. 
-Friends don't let friends run untested directory scripts in production.
+YOU are responsible for complying with applicable laws and regulations for handling PII. 
+Remember, with great power comes great responsibility. 
+Friends don't let friends run untested scripts in production.
 Don't take any wooden nickels
 
-
 .SYNOPSIS
-Script to synchronize employee information from BambooHR to Azure Active Directory. It does not support on premises Active Directory.
+Script to synchronize employee information from BambooHR to Azure Active Directory (now Entra Id). It does not support on premises Active Directory.
 
 .DESCRIPTION
 Extracts employee data from BambooHR and performs one of the following for each user extracted:
 
 	1. Attribute corrections - if the user has an existing account, is an active employee, and the last changed time in Azure AD differs from BambooHR, then this first block will compare each of the AAD User object attributes with the data extracted from BHR and correct them if necessary
 	2. Name change - If the user has an existing account, but the name does not match with the one from BHR, then, this block will run and correct the user Name, UPN,	emailaddress
-	3. New employee, and there is no account in AAD for him, this script block will create a new user with the data extracted from BHR
+	3. New employee, and there is no account in AAD for them, this script block will create a new user with the data extracted from BHR
 
 .PARAMETER BambooHrApiKey
- Specifies the BambooHR API key as a string. It will be converted to the proper format.
+Specifies the BambooHR API key as a string. It will be converted to the proper format.
 
 .PARAMETER AdminEmailAddress 
 Specifies the email address to receive notifications
@@ -72,13 +71,24 @@ Specify when you do not want to make any changes.
 Use this to synchronize mobile phone numbers from BHR to AAD.
 
 .PARAMETER CurrentOnly
-Specify to only pull current employees from BambooHR. Default is to retrieve future employees.
+Specify to only pull current employees from BambooHR. Default is to retrieve current and future employees.
 
 .PARAMETER NotificationEmailAddress
 Specifies an additional email address to send any notification emails to. 
 
+.PARAMETER ForceSharedMailboxPermissions
+When specified shared mailbox permissions are updated
+
+.PARAMETER DefaultProfilePicPath
+Path to a default profile picture to use for new users. If one is not available in Bamboo, this default picture will be used.
+
+.PARAMETER TeamsCardUri
+URI for the Teams webhook to send notifications to.
+
+
 .NOTES
 More documentation available in project README
+
 #>
 
 [CmdletBinding()]
@@ -115,10 +125,9 @@ param (
     $UsageLocation = "US",
     [parameter()]
     [int]
-    $DaysAhead = 5,
+    $DaysAhead = 7,
     [parameter()]
     [string]
-    #$NotificationEmailAddress = "",
     $NotificationEmailAddress = "",
     [parameter()]
     [string]
@@ -128,13 +137,13 @@ param (
     $EmailSignature = "`n Regards, `n`n $CompanyName Automated User Management `n`n`nFor additional information, please review the IT FAQ.`n",
     [parameter()]
     [string]
-    $HelpDeskFAQText = "Please review the <a href='https://company.sharepoint.com/sites/Helpdesk/SitePages/Setting-up-your-new-computer.aspx'>new user setup guide</a> for additional information.",
+    $HelpDeskFAQText = "Please review the <a href='https://company.sharepoint.com/sites/Helpdesk/SitePages/new-computer.aspx'>new user setup guide</a> for additional information.",
     [parameter()]
     [string]
     $DefaultProfilePicPath = (Join-Path Get-Location "DefaultProfilePic.jpg"),
     [parameter()]
     [string]
-    $TeamsCardUri = "https://company.webhook.office.com/webhookb2/XXXXXXXXXXXXXXXXXXXXXXXXXXX/IncomingWebhook/XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+    $TeamsCardUri = "https://company.webhook.office.com/webhookb2/guid/IncomingWebhook/guid",
     [parameter()]
     [switch]
     $TestOnly,
@@ -143,9 +152,14 @@ param (
     $EnableMobilePhoneSync,
     [parameter()]
     [switch]
-    $CurrentOnly
+    $CurrentOnly,
+    [parameter()]
+    [switch]
+    $ForceSharedMailboxPermissions
+
 )
 
+$AzureAutomate = $true
 # Logging Function
 $logFileName = "BhrAadSync-" + (Get-Date -Format yyyyMMdd-HHmm) + ".csv"
 $logFilePath = Join-Path $LogPath $logFileName
@@ -157,7 +171,6 @@ function Write-Log {
         [Parameter()]
         [ValidateNotNullOrEmpty()]
         [string]$Message,
- 
         [Parameter()]
         [ValidateNotNullOrEmpty()]
         [ValidateSet('Debug', 'Information', 'Warning', 'Error', 'Test')]
@@ -165,11 +178,13 @@ function Write-Log {
         $Severity = "Information"
     )
     
-    [pscustomobject]@{
-        Time     = (Get-Date -Format "yyyy/MM/dd HH:mm:ss")
-        Message  = ($Message.Replace("`n", '').Replace("`t", '').Replace("``", ''))
-        Severity = $Severity
-    } | Export-Csv -Path $logFilePath -Append -NoTypeInformation -Force
+    if ($AzureAutomate -eq $false) {
+        [pscustomobject]@{
+            Time     = (Get-Date -Format "yyyy/MM/dd HH:mm:ss")
+            Message  = ($Message.Replace("`n", '').Replace("`t", '').Replace("``", ''))
+            Severity = $Severity
+        } | Export-Csv -Path $logFilePath -Append -NoTypeInformation -Force
+    }
 
     switch ($Severity) {
         Debug { 
@@ -177,20 +192,22 @@ function Write-Log {
         }
         Warning { 
             Write-Warning $Message
+            $Script:logContent += "<p>$Message</p>`n"
         }
         Error { 
             Write-Error $Message
             $Script:logContent += "<p>$Message</p>`n"
         }
         Information { 
-            Write-Host $Message
+            Write-Output $Message
             $Script:logContent += "<p>$Message</p>`n"
         }
         Test { 
             Write-Host " [TestOnly] $Message" -ForegroundColor Green
+            
         } 
         Default { 
-            Write-Output $Message
+            Write-Host $Message
         }
     }
 } 
@@ -203,21 +220,20 @@ function Get-NewPassword {
         .EXAMPLE
             Get-NewPassword -PasswordLength 13 -SpecialChars 4
             Returns a password that is 13 characters long and includes 4 special characters.
+    
+        .PARAMETER PasswordLength
+            Specifies the total length of password to generate
+        .PARAMETER SpecialChars
+            Specifies the number of special characters to include in the generated password.
+        
         .NOTES
             Inspired by: http://blog.oddbit.com/2012/11/04/powershell-random-passwords/
         #>
     [CmdletBinding()]
     [OutputType([string])]
     param (
-        [int]$PasswordLength = 14,
-        # (REQUIRED)
-        #
-        # Specifies the total length of password to generate
-    
+        [int]$PasswordLength = 14,    
         [int]$SpecialChars = 2
-        # (REQUIRED)
-        #
-        # Specifies the number of special characters to include in the generated password.
     )
     $password = ""
     
@@ -236,87 +252,7 @@ function Get-NewPassword {
     
     return $password
 }
-
-function Send-TeamsCard {
-    <#
-    .SYNOPSIS
-    Sends a Microsoft Teams adaptive card with the provided message information to the designated uri.
-    
-    #>
-    [CmdletBinding()]
-    param (
-        # Message you want to send in the card
-        [Parameter()]
-        [string]
-        $Message,
-        # Image you want to attach to the adaptive card
-        [Parameter()]
-        [string]
-        $Image,
-        # Teams Card Subject
-        [Parameter()]
-        [string]
-        $CardSubject = "BHRSync Status",
-        # Webhook URI to post adaptive card.
-        [Parameter()]
-        [string]
-        $Uri = $TeamsCardUri,
-        # Container style for the adaptive card to highlight the status.
-        [Parameter()]
-        [ValidateSet("default", "emphasis", "good", "attention", "warning", "accent")]
-        [string]
-        $ContainerStyle = "default"
-    )
-
-    $noHTMLMessage = $Message.Replace("<p>", "").Replace("</p>", "").Replace("<br/>", "").Replace("<br>", "")
-    $webhookHeaders = @{"Content-Type" = "application/json" }
-    $webhookBody = [Ordered]@{
-        "type"        = "message"
-        "attachments" = @(
-            @{
-                "contentType" = 'application/vnd.microsoft.card.adaptive'
-                "content"     = [Ordered]@{
-                    '$schema' = "<http://adaptivecards.io/schemas/adaptive-card.json>"
-                    "type"    = "AdaptiveCard"
-                    "version" = "1.2"
-                    "body"    = @(
-                        @{
-                            "type"  = "Container"
-                            "style" = $ContainerStyle
-                            "items" = @(
-                                @{
-                                    "type"     = "TextBlock"
-                                    "text"     = $CardSubject
-                                    "size"     = "Large"
-                                    "weight"   = "Bolder"
-                                    "isSubtle" = $true
-                                    "wrap"     = $true
-                                }
-                                @{
-                                    "type" = "TextBlock"
-                                    "text" = "$noHTMLMessage"
-                                    "wrap" = $true
-                                }
-                            )
-                        }
-                    )
-                }
-            }
-        )
-    } | ConvertTo-Json -Depth 20
-
-    Write-Output "`n  JSON body:`n"
-    $webhookBody
-
-    $whResponse = Invoke-RestMethod -Method Post -Uri $Uri -Body $webhookBody -Verbose -Headers $webhookHeaders -TimeoutSec 45
-    Write-Output "`n Response:"    
-    $whResponse | Format-Table -AutoSize -ErrorAction SilentlyContinue
-
-}
-
 function Sync-GroupMailboxDelegation {
-
-
     <#
     .SYNOPSIS
     You can assign a group as a mailbox delegate to allow all users delegate access to the mailbox. However, when a group is assigned,
@@ -340,145 +276,110 @@ function Sync-GroupMailboxDelegation {
 #>
 
     [CmdletBinding()]
-    param (
-        # Parameter help description    
+    param (   
         [Parameter()]
         [string]
         $Group,
-        # Parameter help description
-
         [string]
         $DelegateMailbox,
-        # Parameter help description
-
         [switch]
         $LeaveExistingDelegates,
-        # Parameter help description
-
         [string[]]
         $Permissions = @("FullAccess", "SendAs"),
         [Parameter()]
         [string]
-        $AADCertificateThumbprint,
+        $AADCertificateThumbprint = $AADCertificateThumbprint,
         [parameter()]
         [string]
-        $ExchangeClientAppId,
+        $ExchangeClientAppId = $ExchangeClientAppId,
         [Parameter()]
         [string]
-        $TenantId
+        $TenantId = $TenantId
 
     )
 
-    function Get-AzADGroupMemberRecursive {
-        <#
-.SYNOPSIS
-Get-AzADGroupMemberRecursive - Retrieve Azure AD group memberships recursively using the Az PowerShell module
-.DESCRIPTION 
-Given that there's no native recursive group membership retrieval functionality
-in Az PowerShell, this module can be used to recursively list Azure AD group memberships
-.PARAMETER GroupDisplayName
-The display name of the Azure AD group
-.INPUTS
-System.String.
-.OUTPUTS Microsoft.Azure.Commands.ActiveDirectory.PSADUser, Microsoft.Azure.Commands.ActiveDirectory.PSADGroup, Microsoft.Azure.Commands.ActiveDirectory.PSADServicePrincipal
-.LINK
-https://github.com/dstreefkerk/PowerShell/blob/master/Azure%20AD/Get-AzADGroupMemberRecursive.ps1
-.NOTES
-Written By: Daniel Streefkerk
-Change Log
-v1.0, 16/02/2021 - Initial version
-#>
-        [cmdletbinding()]
-        param(
-            [parameter(Mandatory = $True, ValueFromPipeline = $true)]
-            $GroupDisplayName)
-    
-        begin {
-            try {
-                if ($null -eq (Get-AzAccessToken)) {
-                    Write-Log "Log in with Connect-AzAccount first" -Severity Debug
-                    Connect-AzAccount
+    function Get-MgGroupMemberRecursively {
+        param([Parameter()][string]$GroupId, 
+            [Parameter()][string]$GroupDisplayName
+        ) 
+        if ([string]::IsNullOrWhiteSpace($GroupId)) {
+            $GroupId = (Get-MgGroup -Filter "DisplayName eq '$GroupDisplayName'" -ErrorAction SilentlyContinue).Id
+        }
+        #Write-Output $GroupDisplayName $groupid
+        $output = @()
+        if ($GroupId) {
+            Get-MgGroupMember -GroupId $GroupId -All | ForEach-Object { 
+                if ($_.AdditionalProperties["@odata.type"] -eq "#microsoft.graph.user") {
+                    $output += $_
                 }
-            }
-            catch {
-                throw "An error occurred while accessing Azure via PowerShell"
-            }
+                if ($_.AdditionalProperties["@odata.type"] -eq "#microsoft.graph.group") {
+                    $output += @(Get-MgGroupMemberRecursively -GroupId $_.Id)
+                }
     
-        }
-        
-        process {
-            $members = Get-AzADGroupMember -groupDisplayName $GroupDisplayName
-    
-            # If group contains no members, return null
-            if ($null -eq $members) {
-                return
-            }
-    
-            # Return all members that aren't groups
-            $members | Where-Object { $_.OdataType -ne '#microsoft.graph.group' }
-    
-            # Get sub-groups, and fetch their memberships recursively
-            $groupMembers = $members | Where-Object { $_.OdataType -eq '#microsoft.graph.group' }
-            if ($groupMembers) {
-                $groupMembers | ForEach-Object { Get-AzADGroupMemberRecursive -GroupDisplayName $_.DisplayName }
             }
         }
+        return $output
     }
-    #Connect-ExchangeOnline -CertificateThumbprint $AADCertificateThumbprint -AppId $ExchangeClientAppId -Organization $TenantId 
-    #Connect-ExchangeOnline #-Organization $TenantId
+
+    # We should already be connected to Graph here so no need to do it again. Perhaps check for connection and if not do it again.
+    # Connect-MgGraph -TenantId $TenantID -CertificateThumbprint $AADCertificateThumbprint -ClientId $ExchangeClientAppId
+    Connect-ExchangeOnline -CertificateThumbprint $AADCertificateThumbprint -AppId $ExchangeClientAppId -Organization $TenantId -ShowBanner:$false
+
     $mObj = Get-ExoMailbox -anr $DelegateMailbox
-    #$gObj = Get-AzAdGroup -DisplayName $group
-    $gMembers = Get-AzADGroupMemberRecursive -GroupDisplayName $Group | Sort-Object -Property Id -Unique
+    $gMembers = Get-MgGroupMemberRecursively -GroupDisplayName $Group | Sort-Object -Property Id -Unique
+    Write-Log " members in group: $($gMembers.Count)" -Severity Debug
 
     if ($Permissions -contains "FullAccess") {
-        $existingFullAccessPermissions = (Get-MailboxPermission -Identity $mObj.identity | Sort-Object -Property User -Unique).User | Foreach-object { Get-AzAdUser -UserPrincipalName $_ }
+
+        $existingFullAccessPermissions = Get-ExoMailboxPermission -Identity $mObj.identity | Sort-Object -Property User -Unique | Where-Object { $_.User -notlike "*SELF" } | Sort-Object -Unique -Property User | Foreach-object { Get-MgUser -UserId $_.User }
         $cPermissions = Compare-Object -ReferenceObject $existingFullAccessPermissions -DifferenceObject $gMembers -Property Id
         $missingPermissions = $cPermissions | Where-Object -Property SideIndicator -EQ "=>"
+        Write-Log " Missing perms: $($missingPermissions.Count + 0)" -Severity Debug
         $extraPermissions = $cPermissions | Where-Object -Property SideIndicator -EQ "<="
+        Write-Log " Extra perms: $($extraPermissions.Count +0)" -Severity Debug
+        
         # if need to add FullAccess
-        #$gMembers | ForEach-Object { Add-MailboxPermission -Identity $mObj.Id -User $_.Id -AccessRights ‘FullAccess’ -Automapping:$true –inheritancetype All }
         if (($missingPermissions.Count + 0) -gt 0) {
-            Write-Log -Message "Adding $($missingPermissions.Count) missing permission(s) based on group membership" -Severity Debug
+            Write-Log "Adding $($missingPermissions.Count) missing permission(s) based on group membership" -Severity Information
         
             foreach ($missing in $missingPermissions) {
-                $u = Get-AzAdUser -ObjectId $missing.id
-                Write-Log -Message "`t$($u.DisplayName) does not currently have permissions to $DelegateMailbox, adding now..." -Severity Debug
+                $u = Get-MgUser -UserId $missing.id
+                Write-Log "`t$($u.DisplayName) does not currently have permissions to $DelegateMailbox, adding now..." -Severity Information
                 Add-MailboxPermission -Identity $mObj.Id -User $missing.Id -AccessRights ‘FullAccess’ -Automapping:$true –inheritancetype All | Out-Null
             }
         }
         else {
-            Write-Log -Message "No FullAccess permissions added to $DelegateMailbox" -Severity Debug
+            Write-Log "No Full Access permissions added to $DelegateMailbox" -Severity Debug
         }
     
         if (($LeaveExistingDelegates.IsPresent -eq $false) -and (($extraPermissions.Count + 0) -gt 0)) {
         
-            Write-Log -Message "Removing $($extraPermissions.Count) extra permission(s) based on group membership" -Severity Debug
+            Write-Log "Removing $($extraPermissions.Count) extra permission(s) based on group membership" -Severity Information
             foreach ($extra in $extraPermissions) {
-                $u = Get-AzAdUser -ObjectId $extra.id
-                Write-Log "`t$($u.DisplayName) has permissions to $DelegateMailbox, removing now..." -Severity Debug
+                $u = Get-MgUser -UserId $extra.id
+                Write-Log "`t$($u.DisplayName) has permissions to $DelegateMailbox, removing now..." -Severity Information
                 Remove-MailboxPermission -Identity $mObj.identity -User $extra.Id -Confirm:$false -AccessRights "FullAccess" | Out-Null
             } 
         }
         else {
-            Write-Log "No FullAccess permissions removed from $DelegateMailbox." -Severity Debug
+            Write-Log "No Full Access permissions removed from $DelegateMailbox." -Severity Debug
         }
        
     }
 
+    # If need to add SendAs
     if ($Permissions -contains "SendAs") {
-        # If need to add SendAs
-        #$gMembers | ForEach-Object { Add-RecipientPermission -Identity $DelegateMailbox -AccessRights SendAs -Trustee $_.Id -Confirm:$false }
-    
-        $existingSendAsPermissions = (Get-RecipientPermission -Identity $mObj.identity | Sort-Object -Property Trustee -Unique).Trustee | Foreach-object { Get-AzAdUser -UserPrincipalName $_ }
+        
+        $existingSendAsPermissions = Get-ExoRecipientPermission -Identity $mObj.identity | Where-Object { $_.Trustee -like "*@*" -and $_.AccessControlType -eq "Allow" -and $_.AccessRights -contains "SendAs" } | Sort-Object -Property Trustee -Unique | ForEach-Object { Get-MgUser -UserId $_.Trustee }
         $cPermissions = Compare-Object -ReferenceObject $existingSendAsPermissions -DifferenceObject $gMembers -Property Id
         $missingPermissions = $cPermissions | Where-Object -Property SideIndicator -EQ "=>"
         $extraPermissions = $cPermissions | Where-Object -Property SideIndicator -EQ "<="
         if (($missingPermissions.Count + 0) -gt 0) {
-            Write-Log "Adding $($missingPermissions.Count) missing permission(s) based on group membership" -Severity Debug
+            Write-Log "Adding $($missingPermissions.Count) missing permission(s) based on group membership" -Severity Information
         
             foreach ($missing in $missingPermissions) {
-                $u = Get-AzAdUser -ObjectId $missing.id
-                Write-Log "`t$($u.DisplayName) does not currently have SendAs permissions to $DelegateMailbox, adding now..." -Severity Debug
+                $u = Get-MgUser -UserId $missing.id
+                Write-Log "`t$($u.DisplayName) does not currently have SendAs permissions to $DelegateMailbox, adding now..." -Severity Information
                 Add-RecipientPermission -Identity $mObj.Id -Trustee $missing.Id -AccessRights 'SendAs' -Confirm:$false | Out-Null
             }
         }
@@ -488,10 +389,10 @@ v1.0, 16/02/2021 - Initial version
     
         if (($LeaveExistingDelegates.IsPresent -eq $false) -and (($extraPermissions.Count + 0) -gt 0)) {
     
-            Write-Log "Removing $($extraPermissions.Count) extra permission(s) based on group membership" -Severity Debug
+            Write-Log "Removing $($extraPermissions.Count) extra permission(s) based on group membership" -Severity Information
             foreach ($extra in $extraPermissions) {
-                $u = Get-AzAdUser -ObjectId $extra.id
-                Write-Log "`t$($u.DisplayName) has permissions to $DelegateMailbox, removing now..." -Severity Debug
+                $u = Get-MgUser -UserId $extra.id
+                Write-Log "`t$($u.DisplayName) has permissions to $DelegateMailbox, removing now..." -Severity Information
                 Remove-RecipientPermission -Identity $mObj.identity -Trustee $extra.Id -Confirm:$false -AccessRights "SendAs" | Out-Null
             } 
         }
@@ -500,6 +401,10 @@ v1.0, 16/02/2021 - Initial version
         }
     }
 }
+
+Import-Module Microsoft.Graph.Users
+Import-Module Microsoft.Graph.Users.Actions
+Import-Module PSTeams
 
 # Check if variables are not set. If there is an environment variable, set its value to the variable. Used as an Azure Function
 if ([string]::IsNullOrWhiteSpace($BambooHrApiKey) -and [string]::IsNullOrWhiteSpace($env:BambooHrApiKey)) {
@@ -534,14 +439,13 @@ elseif ([string]::IsNullOrWhiteSpace($CompanyName) -and (-not [string]::IsNullOr
     $CompanyName = $env:CompanyName
 }
 
-
 if ([string]::IsNullOrWhiteSpace($TenantID) -and [string]::IsNullOrWhiteSpace($env:TenantID)) {
     Write-Log "TenantId not defined" -Severity Error
     exit
 }
 elseif ([string]::IsNullOrWhiteSpace($TenantID) -and (-not [string]::IsNullOrWhiteSpace($env:TenantID))) {
     $TenantID = $env:TenantID
-    $env:AZURE_CLIENT_ID = $TenantId
+    $env:AZURE_TENANT_ID = $TenantId
 }
 
 if ([string]::IsNullOrWhiteSpace($AADCertificateThumbprint) -and [string]::IsNullOrWhiteSpace($env:AADCertificateThumbprint)) {
@@ -562,12 +466,20 @@ elseif ([string]::IsNullOrWhiteSpace($AzureClientAppId) -and (-not [string]::IsN
     $env:AZURE_CLIENT_ID = $AzureClientAppId
 }
 
+if ([string]::IsNullOrWhiteSpace($ExchangeClientAppId) -and [string]::IsNullOrWhiteSpace($env:ExchangeClientAppId)) {
+    Write-Log "Exchange Client App Id not defined" -Severity Error
+    exit
+}
+elseif ([string]::IsNullOrWhiteSpace($ExchangeClientAppId) -and (-not [string]::IsNullOrWhiteSpace($env:ExchangeClientAppId))) {
+    $ExchangeClientAppId = $env:ExchangeClientAppId
+    
+}
+
 #$graphClientAppId = $AzureClientAppId.Replace("-", "")
 #$aadCustomDataExtensionName = "extension_$($graphClientAppId)_bhrLastUpdated" 
 $companyEmailDomain = $AdminEmailAddress.Split("@")[1]
 $bhrRootUri = "https://api.bamboohr.com/api/gateway.php/$($BHRCompanyName)/v1"
 $bhrReportsUri = $bhrRootUri
-
 
 # If you only want to retrieve the current employees, not future ones use -CurrentOnly.
 if ($CurrentOnly.IsPresent) {
@@ -578,7 +490,7 @@ else {
 }
 
 $runtime = Measure-Command -Expression {
-    Write-Log -Message "Starting BambooHR to AAD synchronization at $(Get-Date)" -Severity Debug
+    Write-Log -Message "Starting BambooHR to Entra AD synchronization at $(Get-Date)" -Severity Debug
     # Provision users to AAD using the employee details from BambooHR
     Write-Log -Message "Executing Connect-MgGraph -TenantId $TenantID  ..." -Severity Debug
     Connect-MgGraph -TenantId $TenantID -CertificateThumbprint $AADCertificateThumbprint -ClientId $AzureClientAppId
@@ -615,9 +527,16 @@ $runtime = Measure-Command -Expression {
             SaveToSentItems = "True"
         }
 
-        Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress
-        Send-TeamsCard -CardSubject "BhrAadSync error: BambooHR connection failed" -Message "BambooHR connection failed. <br/> EXCEPTION MESSAGE: $($_.Exception.Message) <br/>CATEGORY: $($_.CategoryInfo.Category) <br/> SCRIPT STACK TRACE: $($_.ScriptStackTrace) `n $EmailSignature"
-        Exit
+        Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress -Verbose
+        New-AdaptiveCard {  
+
+            New-AdaptiveTextBlock -Text "BambooHR API connection failed!" -Weight Bolder -Wrap -Color Red
+            New-AdaptiveTextBlock -Text "Exception Message $($_.Exception.Message)" -Wrap
+            New-AdaptiveTextBlock -Text "Category: $($_.CategoryInfo.Category)" -Wrap
+            New-AdaptiveTextBlock -Text "SCRIPT STACK TRACE: $($_.ScriptStackTrace)" -Wrap       
+        
+        } -Uri $TeamsCardUri -Speak "BhrAadSync error: BambooHR connection failed"
+        exit
     }
 
     # If no error returned, it means that the script was not interrupted by the "Exit" command within the "Catch" block. Write info below to log file and continue
@@ -658,8 +577,18 @@ $runtime = Measure-Command -Expression {
             SaveToSentItems = "True"
         }
 
-        Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress
-        Send-TeamsCard -CardSubject "BhrAadSync error: Graph connection failed" -Message "<br/><br/>AAD connection failed.<br/>EXCEPTION: $($error.Exception) <br/> CATEGORY:$($error.CategoryInfo) <br/> ERROR ID: $($error.FullyQualifiedErrorId) <br/>SCRIPT STACK TRACE: $mgErrStack <br/> $EmailSignature"
+        Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress -Verbose
+
+        New-AdaptiveCard {  
+
+            New-AdaptiveTextBlock -Text "AAD Connection Failed" -Weight Bolder -Wrap
+            New-AdaptiveTextBlock -Text "Exception Message $($_.Exception.Message)" -Wrap
+            New-AdaptiveTextBlock -Text "Category: $($_.CategoryInfo.Category)" -Wrap
+            New-AdaptiveTextBlock -Text "ERROR ID: $($error.FullyQualifiedErrorId)" -Wrap
+            New-AdaptiveTextBlock -Text "SCRIPT STACK TRACE: $($_.ScriptStackTrace)" -Wrap        
+        
+        } -Uri $TeamsCardUri -Speak "BhrAadSync error: Graph connection failed"
+
         Disconnect-MgGraph
         Exit
     }
@@ -805,6 +734,7 @@ $runtime = Measure-Command -Expression {
                         if ($TestOnly.IsPresent) {
                             Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -AccountEnabled:$bhrAccountEnabled" -Severity Test
                             Write-Log -Message "Executing: Revoke-MgUserSignInSession -UserId $bhrWorkEmail" -Severity Test
+                            
                         }
                         else {
                             Write-Log -Message "Executing: Revoke-MgUserSignInSession -UserId $bhrWorkEmail" -Severity Debug
@@ -826,8 +756,9 @@ $runtime = Measure-Command -Expression {
 
                         if ($TestOnly.IsPresent) {
                             Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params"  -Severity Test
-                            Write-Log -Message "Executing: UUpdate-MgUser -UserId $bhrWorkEmail -Department 'Not Active' -JobTitle 'Not Active' -OfficeLocation 'Not Active' -BusinessPhones '0' -MobilePhone '0'"  -Severity Test
+                            Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -Department 'Not Active' -JobTitle 'Not Active $(Get-Date)' -OfficeLocation 'Not Active' -BusinessPhones '0' -MobilePhone '0' -CompanyName 'Not Active'"  -Severity Test
                             Write-Log -Message "Executing: Get-MgUserMemberOf -UserId $bhrWorkEmail"  -Severity Test
+                            Write-Log -Message "Executing: $null = Update-MgUser -UserId $bhrWorkEmail -OnPremisesExtensionAttributes @{extensionAttribute1 = '$bhrLastChanged' }" -Severity Test
 
                             Write-Log -Message "Converting $bhrWorkEmail to a shared mailbox..." -Severity Test
                             Write-Log -Message "Executing: Set-Mailbox -Identity $bhrWorkEmail -Type Shared" -Severity Test
@@ -844,9 +775,20 @@ $runtime = Measure-Command -Expression {
                             Write-Log -Message "User $bhrWorkEmail is no longer active in BambooHR, disabling AAD account." -Severity Information
                             Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params"  -Severity Debug
                             Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params
-                            Write-Log -Message "Executing: UUpdate-MgUser -UserId $bhrWorkEmail -Department 'Not Active' -JobTitle 'Not Active' -OfficeLocation 'Not Active' -BusinessPhones '0' -MobilePhone '0'"  -Severity Debug
-                            Update-MgUser -UserId $bhrWorkEmail -Department "Not Active" -JobTitle "Not Active" -OfficeLocation "Not Active" -BusinessPhones "0" -MobilePhone "0"
+                            Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -Department 'Not Active' -JobTitle 'Not Active' -OfficeLocation 'Not Active' -BusinessPhones '0' -MobilePhone '0' -CompanyName '$(Get-Date -Uformat %D)'"  -Severity Debug
+                            Update-MgUser -UserId $bhrWorkEmail -Department "Not Active" -JobTitle "Not Active" -OfficeLocation "Not Active" -BusinessPhones "0" -MobilePhone "0" -CompanyName "$(Get-Date -Uformat %D)"
                             Get-MgUserMemberOf -UserId $bhrWorkEmail
+
+                            # TODO: Does not work for on premises synced accounts. Not a problem with AAD native.
+                            $null = Update-MgUser -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrLastChanged } -UserId $bhrWorkEmail -ErrorAction SilentlyContinue | Out-Null
+
+                            if (!$?) {
+                                #Write-Log -Message "Error changing ExtensionAttribute1. `nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
+                                $error.Clear()
+                            }
+                            else {
+                                Write-Log -Message "$bhrWorkEmail LastChanged attribute set from '$upnExtensionAttribute1' to '$bhrlastChanged'." -Severity Information
+                            }
 
                             # Convert mailbox to shared
                             Connect-ExchangeOnline -CertificateThumbprint $AADCertificateThumbprint -AppId $ExchangeClientAppId -Organization $TenantId 
@@ -856,6 +798,17 @@ $runtime = Measure-Command -Expression {
                             Set-Mailbox -Identity $bhrWorkEmail -Type Shared
                             Disconnect-ExchangeOnline -Confirm:$False
                             
+                            # Give permissions to converted mailbox to previous manager
+
+                            # Move OneDrive for Business content to archive location based on department
+
+                            # Set Out of Office for user
+
+                            # Cancel Meetings
+
+                            # If they are a group owner, reassign ownership to someone else
+
+
                             # Remove Licenses
                             Write-Log -Message "Removing licenses..." -Severity Debug
                             
@@ -866,12 +819,12 @@ $runtime = Measure-Command -Expression {
                             Write-Log -Message "Remove group memberships" -Severity Debug
                             Write-Log -Message "Executing: Get-MgUserMemberOf -UserId $bhrWorkEmail | ForEach-Object { Remove-MgGroupMemberByRef -GroupId $_.id -DirectoryObjectId $aadUpnObjDetails.id } " -Severity Debug
                             
-                            Get-MgUserMemberOf -UserId $bhrWorkEmail | ForEach-Object { Remove-MgGroupMemberByRef -GroupId $_.id -DirectoryObjectId $aadUpnObjDetails.id -ErrorAction SilentlyContinue } 
+                            Get-MgUserMemberOf -UserId $bhrWorkEmail | ForEach-Object { Remove-MgGroupMemberByRef -GroupId $_.id -DirectoryObjectId $aadUpnObjDetails.id -ErrorAction SilentlyContinue; Start-Sleep 10 } 
                             $methodID = Get-MgUserAuthenticationMethod -UserId $bhrWorkEmail | Select-Object id 
                             $methodsdata = Get-MgUserAuthenticationMethod -UserId $bhrWorkEmail | Select-Object -ExpandProperty AdditionalProperties
                             $methods_count = ($methodID | Measure-Object | Select-Object count).count
                             
-                            # Pass through each authentication method and remove them
+                            # Loop through and remove each authentication method
                             $error.Clear() 
 
                             for ($i = 0 ; $i -lt $methods_count ; $i++) {
@@ -880,10 +833,15 @@ $runtime = Measure-Command -Expression {
                                 if ((($methodsdata[$i]).Values) -like "*microsoftAuthenticatorAuthenticationMethod*") { Remove-MgUserAuthenticationMicrosoftAuthenticatorMethod -UserId $bhrWorkEmail -MicrosoftAuthenticatorAuthenticationMethodId ($methodID[$i]).id; Write-Log -Message "Removed auth app method for $bhrWorkEmail." -Severity Warning }
                                 if ((($methodsdata[$i]).Values) -like "*windowsHelloForBusinessAuthenticationMethod*") { Remove-MgUserAuthenticationFido2Method -UserId $bhrWorkEmail -Fido2AuthenticationMethodId ($methodID[$i]).id ; Write-Log -Message "Removed PIN auth method for $bhrWorkEmail." -Severity Warning }
                             }
+
+                            # Remove Manager
+                            Write-Log -Message "Removing Manager..." -Severity Debug   
+                            Write-Log -Message "Executing: Remove-MgUserManager -UserId $bhrWorkEmail" -Severity Debug
+                            Remove-MgUserManager -UserId $bhrWorkEmail
+
                             Write-Log -Message "Executing: Update-MgUser -EmployeeId 'LVR' -UserId $bhrWorkEmail" -Severity Debug
                             Update-MgUser -EmployeeId 'LVR' -UserId $bhrWorkEmail
                             Write-Log -Message "Updating shared mailbox settings..."
-
 
                             if ($error.Count -ne 0) {
                                 $error | ForEach-Object {
@@ -900,7 +858,7 @@ $runtime = Measure-Command -Expression {
                         }
                     }
                     else {
-                        Write-Log "Account is not disabled or terminated. Will continue to update active user data." -Severity Debug
+                        Write-Log "Account is not disabled or terminated, looking for user updates." -Severity Debug
   
                         if ($bhrAccountEnabled -eq $true -and $aadstatus -eq $false) {
                             # The account is marked "Active" in BHR and "Inactive" in AAD, enable the AAD account
@@ -931,7 +889,7 @@ $runtime = Measure-Command -Expression {
                                         Subject      = "User Account Re-enabled: $bhrdisplayName"
                                         Body         = @{
                                             ContentType = "html"
-                                            Content     = "<br/>One of your direct report's user account has been re-enabled. Please securely share this information with them so that they can login.<br/> User name: $bhrWorkEmail <br/> Temporary Password: $newPas.`n $EmailSignature"
+                                            Content     = "<br/>One of your direct report's user account has been re-enabled. Please securely share this information with them so that they can login.<br/> User name: $bhrWorkEmail <br/> Temporary Password: $newPas.`n<br/><br/> $EmailSignature"
                                         }
                                         ToRecipients = @(
                                             @{
@@ -955,11 +913,19 @@ $runtime = Measure-Command -Expression {
                                     SaveToSentItems = "True"
                                 }
 
-                                Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress
-                                Send-TeamsCard -CardSubject "User Account Re-enabled: $bhrdisplayName" -Message "<br/>One of your direct report's user account has been re-enabled. Please securely share this information with them so that they can login.<br/> User name: $bhrWorkEmail <br/> Temporary Password: $newPas.`n $EmailSignature"
+                                Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress -Verbose
+                               
+                                New-AdaptiveCard {  
+
+                                    New-AdaptiveTextBlock -Text "User Account $bhrWorkEmail Re-enabled" -HorizontalAlignment Center -Wrap -Weight Large
+                                    New-AdaptiveTextBlock -Text "User name: $bhrWorkEmail" -Wrap
+                                    New-AdaptiveTextBlock -Text "Temporary Password: $newPas" -Wrap     
+        
+                                } -Uri $TeamsCardUri -Speak "User Account Re-enabled: $bhrdisplayName"
+                               
                                 if (!$?) {
     
-                                    Write-Log -Message " Could not activate the user account. `n`nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
+                                    Write-Log -Message " Could not activate user account. `n`nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
                                     $error.Clear()
                                 }
                                 else {
@@ -1047,7 +1013,7 @@ $runtime = Measure-Command -Expression {
                                 }
                                 else {
                                     $error.Clear()
-                                    Write-Log -Message "Manager of $bhrWorkEmail in AAD '$aadsupervisorEmail' and in BambooHR '$bhrsupervisorEmail'. Setting the Manager found on BambooHR to the Azure User Object." -Severity Warning
+                                    Write-Log -Message "Manager of $bhrWorkEmail in AAD '$aadsupervisorEmail' and in BambooHR '$bhrsupervisorEmail'. Setting new manager to the Azure User Object." -Severity Information
                                 }
                             }
                         }
@@ -1465,9 +1431,16 @@ $runtime = Measure-Command -Expression {
                                 SaveToSentItems = "True"
                             }
                                 
-                            Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress
-                            Send-TeamsCard -CardSubject "Login changed for $bhrdisplayName" -Message "
-                            <p>Your email address was changed in the $CompanyName BambooHR. Your user account has been changed accordingly.</p><ui><li>Use your new user name: $bhrWorkEmail</li><li>Your password has not been modified.</li></ul><br/><p>$EmailSignature</p>"
+                            Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress -Verbose
+
+                            New-AdaptiveCard {  
+
+                                New-AdaptiveTextBlock -Text "Login changed for $bhrdisplayName" -HorizontalAlignment Center -Weight Bolder -Wrap
+                                New-AdaptiveTextBlock -Text "An email address was changed in the $CompanyName BambooHR. Your user account has been changed accordingly." -Wrap
+                                New-AdaptiveTextBlock -Text "The user should use the new user name: $bhrWorkEmail" -Wrap     
+                                New-AdaptiveTextBlock -Text "The user's password has not been modified." -Wrap   
+                            } -Uri $TeamsCardUri -Speak "Login changed for $bhrdisplayName"
+
                         }
                     }
                 }
@@ -1511,8 +1484,8 @@ $runtime = Measure-Command -Expression {
                     Write-Log -Message "Executing: Invoke-RestMethod -Uri $bhrRep -Method POST -Headers $headers -ContentType 'application/json' -OutFile $profilePicPath" -Severity Debug
                     $null = Invoke-RestMethod -Uri $bhrEmployeePhotoUri -Method GET -Headers $headers -ContentType 'application/json' -OutFile $profilePicPath -ErrorAction SilentlyContinue | Out-Null
 
-                    Write-Log "Reconnecting to mggraph..." -Severity Debug
-                    $null = Disconnect-Mggraph | Out-Null
+                    Write-Log "Reconnecting to Microsoft Graph..." -Severity Debug
+                    $null = Disconnect-MgGraph | Out-Null
                     Connect-MgGraph -TenantId $TenantID -CertificateThumbprint $AADCertificateThumbprint -ClientId $AzureClientAppId | Out-Null
                     Write-Log "Updating user account with BambooHR profile picture..." -Severity Information
                     $user = Get-MgUser -UserId $bhrWorkEmail -ErrorAction SilentlyContinue
@@ -1544,7 +1517,7 @@ $runtime = Measure-Command -Expression {
                             }
                             Start-Sleep -Seconds 8
                         
-                            Write-Log -Message "Setting the manager of the newly created user $bhrWorkEmail." -Severity Debug
+                            Write-Log -Message "Setting manager for newly created user $bhrWorkEmail." -Severity Debug
                             Write-Log -Message "Executing: Set-MgUserManagerByRef -UserId $bhrWorkEmail -BodyParameter $NewManager" -Severity Debug
                             Set-MgUserManagerByRef -UserId $bhrWorkEmail -BodyParameter $NewManager
                             $params = @{
@@ -1577,11 +1550,18 @@ $runtime = Measure-Command -Expression {
                                 SaveToSentItems = "True"
                             }
                             Write-Log -Message "Sending $bhrSupervisorEmail new employee information for $bhrDisplayName in email." -Severity Information
-                            Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress 
+                            Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress -Verbose
+                            New-AdaptiveCard {  
+
+                                New-AdaptiveTextBlock -Text 'New User Account Created' -HorizontalAlignment Center -Weight Bolder -Wrap
+                                New-AdaptiveTextBlock -Text "User name: $bhrWorkEmail" -Wrap
+                                New-AdaptiveTextBlock -Text "Password: $($PasswordProfile.Values)" -Wrap
+                            } -Uri $TeamsCardUri -Speak "New User $bhrDisplayName Account Created"
 
                             # Todo input these and an array and loop through only if needed.
-                            Sync-GroupMailboxDelegation.ps1 -Group "CG-SharedMailboxDelegatedAccessScheduling" -DelegateMailbox Scheduling
-                            Sync-GroupMailboxDelegation.ps1 -Group "CG-SharedMailboxDelegatedAccessCustomerCare" -DelegateMailbox CustomerCare
+                            Sync-GroupMailboxDelegation -Group "CG-SharedMailboxDelegatedAccessScheduling" -DelegateMailbox Scheduling
+                            Sync-GroupMailboxDelegation -Group "CG-SharedMailboxDelegatedAccessCustomerCare" -DelegateMailbox CustomerCare
+                            Sync-GroupMailboxDelegation -Group "CG-SharedMailboxDelegatedAccessSalesLeads" -DelegateMailbox Lead
                         }
                         else {
                             $params = @{
@@ -1615,9 +1595,16 @@ $runtime = Measure-Command -Expression {
                                 SaveToSentItems = "True"
                             }
                             Write-Log -Message "Sending new employee information to default notification email because no manager was defined." -Severity Information
-                            Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress 
-                            Send-TeamsCard -CardSubject "New User Account Created" -Message "<br/><p>New employee user account created for $bhrDisplayName. No manager account is currently active for this account so this info is being sent to the default location.`
-                            <p> $HelpDeskFAQText <ul><li>User name: $bhrWorkEmail</li><li>Password: $($PasswordProfile.Values)</li></ul></p><p>$EmailSignature</p>" -ContainerStyle default
+                            Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress -Verbose
+
+                            New-AdaptiveCard {  
+
+                                New-AdaptiveTextBlock -Text 'New user account created without assigned manager' -HorizontalAlignment Center -Weight Bolder -Wrap
+                                New-AdaptiveTextBlock -Text "No manager account is currently active for this account so this info is being sent to the default location." -Wrap
+                                New-AdaptiveTextBlock -Text "User name: $bhrWorkEmail" -Wrap
+                                New-AdaptiveTextBlock -Text "Password: $($PasswordProfile.Values)" -Wrap
+                            } -Uri $TeamsCardUri -Speak "New User $bhrDisplayName Account Created"
+
                         }
 
                         #Assigning the user to BambooHR enterprise app
@@ -1655,8 +1642,15 @@ $runtime = Measure-Command -Expression {
                         }
             
                         # Send Mail Message parameters definition closure
-                        #Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress
-                        Send-TeamsCard -CardSubject "BHR-Sync Error" -Message "<p>Hello,</p><br/><p>Account creation for user: $bhrWorkEmail has failed. Please check the log: $logFileName for further details.<br/>The error information is  below. <ul><li>Error Message: $($error.Exception.Message)</li><li>Error Category: $($error.CategoryInfo)</li><li>Error ID: $($error.FullyQualifiedErrorId)</li><li>Stack: $($error.ScriptStackTrace)</li></ul></p><p>$EmailSignature</p>" -ContainerStyle warning
+                        Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress -Verbose
+                        New-AdaptiveCard {  
+
+                            New-AdaptiveTextBlock -Text "Account creation for user: $bhrWorkEmail has failed." -HorizontalAlignment Center -Weight Bolder -Wrap
+                            New-AdaptiveTextBlock -Text "Error Message: $($error.Exception.Message)" -Wrap
+                            New-AdaptiveTextBlock -Text "Error Category: $($error.CategoryInfo)" -Wrap
+                            New-AdaptiveTextBlock -Text "Error ID: $($error.FullyQualifiedErrorId)" -Wrap
+                            New-AdaptiveTextBlock -Text "Stack: $($error.ScriptStackTrace)" -Wrap
+                        } -Uri $TeamsCardUri -Speak "BHR-Sync Account Creation Error"
                     }
                 }
             }                    
@@ -1665,7 +1659,7 @@ $runtime = Measure-Command -Expression {
             # If Hire Date is less than $days days in the future or in the past closure
             # The user account does not need to be created as it does not satisfy the condition of the HireDate being $DaysAhead days or less in the future
             if ($bhrAccountEnabled) {
-                Write-Log -Message "The Employee $bhrWorkEmail hire date is more than $DaysAhead days in the future." -Severity Information
+                Write-Log -Message "The Employee $bhrWorkEmail hire date ($bhrHireDate) is more than $DaysAhead days in the future ." -Severity Information
             }
             else {
                 Write-Log -Message "The Employee $bhrWorkEmail has been terminated and will not be added." -Severity Debug
@@ -1676,43 +1670,42 @@ $runtime = Measure-Command -Expression {
     }
 }
 if (($TestOnly.IsPresent -eq $false ) -and ([string]::IsNullOrWhiteSpace($Script:logContent)) -eq $false) {
-    Write-Log -Message "`nCompleted sync at $(Get-Date) and ran for $($runtime.Totalseconds) seconds" -Severity Information
-    $params = @{
-        Message         = @{
-            Subject      = "BambooHR to AAD Sync Results"
-            Body         = @{
-                ContentType = "html"
-                Content     = "<p>BambooHR to AAD sync ran with the following results:</p><br/>$Script:LogContent<br/><br/>"
-            }
-            ToRecipients = @(
-                @{
-                    EmailAddress = @{
-                        Address = $AdminEmailAddress
-                    }
-                }
-            )
-            CCRecipients = @(
-                @{
-                    EmailAddress = @{
-                        Address = $NotificationEmailAddress
-                    }
-                }
-            )
-        }
-        SaveToSentItems = "True"
-    }
+    Write-Log -Message "`n Completed sync at $(Get-Date) and ran for $($runtime.Totalseconds) seconds" -Severity Information
+    
+    New-AdaptiveCard {  
+        New-AdaptiveTextBlock -Text "BHR Sync Successful" -Wrap -Weight Bolder
+        $Script:logContent | ForEach-Object { $atb = $_.Replace("<p>", "").Replace("</p>", "").Replace("<br/>", "").Replace("<br>", ""); New-AdaptiveTextBlock -Text $atb -Wrap }
+    } -Uri $TeamsCardUri -Speak "BambooHR to AAD sync ran successfully!"
 
-    #Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress
-    Send-TeamsCard -Message "<p>BambooHR to AAD sync ran with the following results:</p><br/>$Script:LogContent<br/><br/>"
     Start-Sleep 30
-    Sync-GroupMailboxDelegation.ps1 -Group "CG-SharedMailboxDelegatedAccessScheduling" -DelegateMailbox Scheduling
-    Sync-GroupMailboxDelegation.ps1 -Group "CG-SharedMailboxDelegatedAccessCustomerCare" -DelegateMailbox CustomerCare
-
+    # TODO: Accept these as parameters, as a hashtable or other method that can be set at runtime.
+    # This is to assign permissions to shared mailboxes individually, based on group membership.
+    # This is useful when a shared mailbox is used for a department.
+    #Sync-GroupMailboxDelegation -Group "GROUP-1-NAME" -DelegateMailbox "SHARED-MAILBOX-1-NAME"
+    #Sync-GroupMailboxDelegation -Group "GROUP-2-NAME" -DelegateMailbox "SHARED-MAILBOX-2-NAME"
 }
 else { 
-    Write-Log -Message "`nCompleted sync at $(Get-Date) and ran for $($runtime.Totalseconds) seconds" -Severity Information
+    Write-Log -Message "`n Completed sync at $(Get-Date) and ran for $($runtime.Totalseconds) seconds" -Severity Information
+
+    New-AdaptiveCard {  
+        New-AdaptiveTextBlock -Text "BHR Sync Successful" -Wrap -Weight Bolder 
+        $Script:logContent | ForEach-Object { 
+            $atb = $_.Replace("<p>", "").Replace("</p>", "").Replace("<br/>", "").Replace("<br>", "");
+            New-AdaptiveTextBlock -Text $atb -Wrap
+        }
+    } -Uri $TeamsCardUri -Speak "BambooHR to AAD sync ran successfully!"
+
     Write-Log "No log content to share, no message sent" -Severity Debug
+
+    if ($ForceSharedMailboxPermissions.IsPresent) {
+         
+        # TODO: Accept these as parameters, as a hashtable or other method that can be set at runtime.
+        # This is to assign permissions to shared mailboxes individually, based on group membership.
+        # This is useful when a shared mailbox is used for a department.
+        #Sync-GroupMailboxDelegation -Group "GROUP-1-NAME" -DelegateMailbox "SHARED-MAILBOX-1-NAME"
+        #Sync-GroupMailboxDelegation -Group "GROUP-2-NAME" -DelegateMailbox "SHARED-MAILBOX-2-NAME"
+
+    }
 }
-Disconnect-MgGraph | Out-Null
-Exit
 #Script End
+exit 0

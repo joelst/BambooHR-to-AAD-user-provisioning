@@ -1,7 +1,7 @@
 # BambooHR to Azure AD user provisioning
 User provisioning from BambooHR to AAD
 
-## Updated 7/15/2023
+## Updated 11/27/2023
 This is a fork of the AMAZING work done by [PaulTony BHR-to-AzAd-user-Provisioning](https://github.com/PaulTony-coocoo/BHR-to-AzAD-user-provisioning). Their work saved me many hours having to put together this myself and I'm very grateful!
 
 Anyone is free to take what is here and I will happily contribute my changes back to the original author, if they find my ideas worthy. 
@@ -13,9 +13,13 @@ What is different about this from the original?
 3. Make this easily run using Azure Automation or as an Azure Function. So I'm adding parameters to allow for easy customization without modifying the code, making it easier to execute it in Azure Automation or an Azure Function.
 4. My project is for a cloud-first AAD organization that but has on some hybrid user objects. This has lead to issues with some attributes not being writable. I'm trying to build a process that works for both withouth being too complicated.
 5. I've got a _little OCD_ when it comes to silly things like variable names. Although I _really_ tried to fight my irrational desire to change them, I failed. No, there wasn't anything wrong with the original ones, just try explaining that to my OCD. 
-6. I'd like to add sync for a couple other things like photos.
 
 ## Latest changes
+
+- Improvements to make running in Azure Automation easier.
+
+
+## July 2023 changes
 
 - Fixed errors I introduced around name changes.
 - If an employee is not active and their account is disabled don't keep synchronizing their department and other info. Also, set the department to "" when they are deactivated.
