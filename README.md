@@ -1,5 +1,6 @@
-# BambooHR to Azure AD user provisioning
-User provisioning from BambooHR to Entra Id formerly known as Azure Active Directory (AAD)
+# BambooHR to Entra Id (Azure AD) user provisioning
+
+User provisioning from BambooHR to Entra Id formerly known as Azure Active Directory (AAD).
 
 ## Introduction
 
@@ -13,11 +14,29 @@ What is different about this from the original?
 2. Moving to use the [Microsoft Graph 2.x PowerShell modules](https://devblogs.microsoft.com/microsoft365dev/microsoft-graph-powershell-v2-is-now-in-public-preview-half-the-size-and-will-speed-up-your-automations/). There are some differences that forced changes.
 3. Make it run using Azure Automation or as an Azure Function. So I'm adding parameters to allow for easy customization without modifying the code, making it easier to execute it in Azure Automation or an Azure Function.
 4. My project is for a cloud-first Entra Id (AAD) organization that but has on some hybrid user objects. This has lead to issues with some attributes not being writable.
-5. I've got a _little OCD_ when it comes to silly things like variable names. Although I _really_ tried to fight my irrational desire to change them, I failed. No, there wasn't anything wrong with the original ones, just try explaining that to my OCD. 
+5. I've got a _little OCD_ when it comes to silly things like variable names. Although I _really_ tried to fight my irrational desire to change them, I failed. No, there wasn't anything wrong with the original ones, just try explaining that to my OCD.
+6. If you happen to use the script, please star the repo.
 
 ## Changes & Updates
 
 This section will keep track of changes made over time.
+
+### TODO 
+
+- Clean up authentication required and move managed identity.
+- Create an Azure Automate template for easy deployment.
+- Fix any "AAD" variables and text now that it is Entra Id. 
+
+### January 2025 changes
+
+- Added mailbox delegation based on group membership with an array with the group and mailboxes.
+- Added license tracking. This will report to make sure there are enough licenses and send an email and teams message if it breaches the defined free licenses.
+- Update to new Teams webhooks.
+- Requires Microsoft.Graph.Identity.DirectoryManagement
+- A welcome message to new users. The formatting is ugly, but you can customize it.
+- Offboarding: Removed mailbox is set to Shared and the manager is given permissions to it. You will need to manually remove these later.
+- Re-onboarding: If user is disabled and then re-enabled it will undo the shared mailbox permissions.
+- Minor text changes and error reporting changes
 
 ### November 2023 changes
 
