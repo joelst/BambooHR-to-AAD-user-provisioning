@@ -11,7 +11,7 @@ local.settings.json
 *.xml
 *.dll
 DefaultProfilePic.jpg
-
+_*.ps1
 
 # Azurite artifacts
 __blobstorage__
