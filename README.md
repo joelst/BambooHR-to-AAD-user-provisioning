@@ -21,11 +21,22 @@ What is different about this from the original?
 
 This section will keep track of changes made over time.
 
-### TODO 
+### TODO
 
 - Clean up authentication required and move managed identity.
 - Create an Azure Automate template for easy deployment.
-- Fix any "AAD" variables and text now that it is Entra Id. 
+- Fix any "AAD" variables and text now that it is Entra Id.
+
+### February 2025 changes
+
+- Reconfiguredthe script to run in Azure Automation using variables for most configuration. Create the following variables:
+  - BambooHrApiKey
+  - BhrCompanyName
+  - CompanyName
+  - TeamsCardUri
+  - TenantId
+- Removed certificate and application registrations authentication and added using a system managed identity.
+- Review [Add-ManagedIdentityPermissions.ps1](./Add-ManagedIdentityPermissions.ps1) to get started assigning the Automation account appropriate permissions.
 
 ### January 2025 changes
 

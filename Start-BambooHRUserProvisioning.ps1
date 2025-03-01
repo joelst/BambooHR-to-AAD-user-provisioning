@@ -17,9 +17,9 @@ Script to synchronize employee information from BambooHR to Azure Active Directo
 .DESCRIPTION
 Extracts employee data from BambooHR and performs one of the following for each user extracted:
 
-	1. Attribute corrections - if the user has an existing account, is an active employee, and the last changed time in Azure AD differs from BambooHR, then this first block will compare each of the Entra User object attributes with the data extracted from BHR and correct them if necessary
+	1. Attribute corrections - if the user has an existing account, is an active employee, and the last changed time in Azure AD differs from BambooHR, then this first block will compare each of the AAD User object attributes with the data extracted from BHR and correct them if necessary
 	2. Name change - If the user has an existing account, but the name does not match with the one from BHR, then, this block will run and correct the user Name, UPN,	emailaddress
-	3. New employee, and there is no account in Entra for him, this script block will create a new user with the data extracted from BHR
+	3. New employee, and there is no account in AAD for him, this script block will create a new user with the data extracted from BHR
 
 .PARAMETER BambooHrApiKey
 Specifies the BambooHR API key as a string. It will be converted to the proper format.
@@ -36,15 +36,6 @@ Specifies the BambooHR company name used in the URL
 .PARAMETER TenantID 
 Specifies the Microsoft tenant name (company.onmicrosoft.com)
 
-.PARAMETER AADCertificateThumbprint 
-Specifies the certificate thumbprint for the Azure AD client application.
-
-.PARAMETER AzureClientAppId 
-Specifies the Azure AD client application id
-
-.PARAMETER ExchangeClientAppId
-Specify Exchange client app for completing Exchange-specific commands that do not support Microsoft Graph and must use a separate authentication. 
-
 .PARAMETER HelpDeskEmailAddress
 Email address for help desk
 
@@ -58,7 +49,7 @@ Sentence to add to new user email messages specific to finding the IT helpdesk F
 Location to save logs
 
 .PARAMETER UsageLocation
-A two letter country code (ISO standard 3166) to set Entra usage location. 
+A two letter country code (ISO standard 3166) to set AAD usage location. 
 Required for users that will be assigned licenses due to legal requirement to check for availability of services in countries. Examples include: US, JP, and GB.
 
 .PARAMETER DaysAhead
@@ -91,31 +82,22 @@ More documentation available in project README
 param (
     [Parameter()]
     [String]
-    $BambooHrApiKey = "",
+    $BambooHrApiKey = $env:BambooHrApiKey,
     [Parameter()]
     [String]
-    $AdminEmailAddress = "bhr-sync@domain.com",
+    $AdminEmailAddress = "bhr-sync@companydomain.com",
     [Parameter()]
     [string]
-    $BHRCompanyName = "",
+    $BHRCompanyName = $env:BHRCompanyName,
     [Parameter()]
     [string]
-    $CompanyName = "",
+    $CompanyName = $env:CompanyName,
     [Parameter()]
     [string]
-    $TenantId = "tenant.onmicrosoft.com",
-    [Parameter()]
-    [string]
-    $AADCertificateThumbprint = "",
+    $TenantId = $env:TenantId,
     [parameter()]
     [string]
-    $AzureClientAppId = "",
-    [parameter()]
-    [string]
-    $ExchangeClientAppId = "",
-    [parameter()]
-    [string]
-    $LogPath = (Get-Location),
+    $LogPath = "C:\temp\bamboo",
     [parameter()]
     [string]
     $UsageLocation = "US",
@@ -125,22 +107,22 @@ param (
     $DaysAhead = 7,
     [parameter()]
     [string]
-    $NotificationEmailAddress = "hr-dept@domain.com",
+    $NotificationEmailAddress = "hr@companydomain.com",
     [parameter()]
     [string]
-    $HelpDeskEmailAddress = "helpdesk@domain.com",
+    $HelpDeskEmailAddress = "helpdesk@companydomain.com",
     [parameter()]
     [string]
-    $EmailSignature = "<br/>Regards, <br/> $CompanyName Automated User Management <br/><br/>For additional information, please review the <a href='ADD A URL HERE'>IT FAQ.</a><br/>",
+    $EmailSignature = "<br/>Regards, <br/> $CompanyName Automated User Management <br/><br/>For additional information, please review the <a href='https://bing.com'>IT FAQ.</a><br/>",
     [parameter()]
     [string]
-    $WelcomeUserText = "Please review the <a href='URL FOR USER SETUP GUIDE''>new user setup guide</a> for getting started. We also recommend printing the <a href='URL HERE'>IT Quick Reference Guide</a> so can find help when technology isn't cooperating.",
+    $WelcomeUserText = "Please review the <a href='https://bing.com'>new user setup guide</a> for getting started. We also recommend printing the <a href='https://bing.com'>IT Quick Reference Guide</a> so can find help when technology isn't cooperating.",
     [parameter()]
     [string]
     $DefaultProfilePicPath = (Join-Path Get-Location "DefaultProfilePic.jpg"),
     [parameter()]
     [string]
-    $TeamsCardUri = "https://outlook.office.com/webhook/... CREATE A WEBHOOK URL IN TEAMS",
+    $TeamsCardUri = $TeamsCardUri,
     [parameter()]
     [switch]
     $TestOnly,
@@ -153,21 +135,24 @@ param (
     [parameter()]
     [switch]
     $ForceSharedMailboxPermissions,
-    # The following is for delegating mailbox access to a group. It ensures each user in the group has access to the mailbox.
-    # It removes any users not in the group. This fixes the problem that mailboxes assigned to a group are not automapped in Outlook.
     $MailboxDelegationParams = @(
         @{
-            Group           = "ENTRA ID GROUP NAME 1"
-            DelegateMailbox = "MAILBOX 1 TO DELGATE ACCESS TO"
+            Group           = "CG-SharedMailboxDelegatedAccessMailbox1"
+            DelegateMailbox = "Mailbox1"
         }
         @{
-            Group           = "ENTRA ID GROUP NAME 2"
-            DelegateMailbox = "MAILBOX 2 TO DELGATE ACCESS TO"
+            Group           = "CG-SharedMailboxDelegatedAccessMailbox2"
+            DelegateMailbox = "Mailbox2"
         }
+        @{
+            Group           = "CG-SharedMailboxDelegatedAccessMailbox3"
+            DelegateMailbox = "Mailbox3"
+        }                            
     ),
     [parameter()]
     [string]
-    $LicenseId = ""
+    # Business Premium License Id - replace with the license id that you are assigning
+    $LicenseId = "21546e07-2132-445d-b21e-9ca36bf847c2_cbdc14ab-d96c-4c30-b9f4-6ada7cdc1d46"
 )
 
 $AzureAutomate = $true
@@ -177,15 +162,6 @@ $logFilePath = Join-Path $LogPath $logFileName
 $Script:logContent = ""
 
 function Write-Log {
-    <#
-    
-    .SYNOPSIS
-    Writes a message to the log file and optionally to the console.
-
-    .DESCRIPTION
-    Handles all logging and output to the console. If running in Azure Automation, only outputs to the console. If running locally, outputs to the console and writes to the log file.
-    #>
-
     [CmdletBinding()]
     param(
         [Parameter()]
@@ -235,7 +211,7 @@ function Write-Log {
 function Get-LicenseStatus {
     <#
     .SYNOPSIS
-    Get the license status for the specified license id. We can check if there are any available licenses for the specified license id.
+    Get the license status for the specified license id.
     .PARAMETER LicenseId
     The license id to check for availability.
     .PARAMETER TeamsCardUri
@@ -395,131 +371,6 @@ function Get-NewPassword {
     return $password
 }
 
-function Send-TeamsCard {
-    <#
-    .SYNOPSIS
-    Sends a Microsoft Teams adaptive card with the provided message information to the designated uri.
-    .PARAMETER Message
-        Message to send in the card
-    .PARAMETER Image
-        Image you want to attach to the adaptive card
-    .PARAMETER CardSubject
-        Card subject
-    .PARAMETER Uri
-        Webhook URI to post adaptive card.
-    .PARAMETER ContainerStyle
-        Container style for the adaptive card to highlight the status.
-    #>
-    [CmdletBinding()]
-    param (
-        [Parameter()]
-        [string]
-        $Message,
-        [Parameter()]
-        [string]
-        $Image,
-        [Parameter()]
-        [string]
-        $CardSubject = "BHRSync Status",
-        [Parameter()]
-        [string]
-        $Uri = $TeamsCardUri,
-        [Parameter()]
-        [ValidateSet("default", "emphasis", "good", "attention", "warning", "accent")]
-        [string]
-        $ContainerStyle = "default",
-        [ValidateSet("Accent", 'Default', 'Dark', 'Light', 'Good', 'Warning', 'Attention')][string] $Color,
-        [ValidateSet('Default', 'Monospace')][string] $FontType,
-        [ValidateSet("Left", "Center", 'Right')][string] $HorizontalAlignment,
-        [alias('FontSize')][ValidateSet("Small", 'Default', "Medium", "Large", "ExtraLarge")][string] $Size,
-        [alias('FontWeight')][ValidateSet("Lighter", 'Default', "Bolder")][string] $Weight,
-        [switch] $Highlight,
-        [switch] $Italic,
-        [switch] $StrikeThrough,
-        [switch] $Wrap,
-        [alias('BlockElementHeight')][ValidateSet('Stretch', 'Automatic')][string] $Height,
-        [switch] $Separator,
-        [ValidateSet('None', 'Small', 'Default', 'Medium', 'Large', 'ExtraLarge', 'Padding')][string] $Spacing,
-        [switch] $Hidden
-    )
-
-    $noHTMLMessage = $Message.Replace("<p>", "").Replace("</p>", "").Replace("<br/>", "").Replace("<br>", "")
-    $webhookHeaders = @{"Content-Type" = "application/json" }
-
-    $TeamObject = [ordered]@{
-        type                = "TextBlock"
-        # the intent behind this is to allow for empty textblocks to be created
-        # if there is no text, the block is never added which causes all sort of issues
-        # this is a workaround for that
-        text                = if ($noHTMLMessage -eq '') { "$([char]0x200F)" } else { $noHTMLMessage }
-        spacing             = $Spacing
-        horizontalAlignment = $HorizontalAlignment
-        size                = $Size
-        weight              = $Weight
-        color               = $Color
-        height              = $Height
-        fontType            = $FontType
-        highlight           = $Highlight
-        italic              = $Italic
-        strikeThrough       = $StrikeThrough
-    }
-    if ($MaximumLines) {
-        $TeamObject['maxLines'] = $MaximumLines
-    }
-    if ($Separator) {
-        $TeamObject['separator'] = $Separator.IsPresent
-    }
-    if ($Wrap) {
-        $TeamObject['wrap'] = $Wrap.IsPresent
-    }
-    if ($Subtle) {
-        $TeamObject['isSubtle'] = $true
-    }
-    if ($Hidden) {
-        $TeamObject['isVisible'] = $false
-    }
-
-
-    $webhookBody = [Ordered]@{
-        "type"        = "message"
-        "attachments" = @(
-            @{
-                "contentType" = 'application/vnd.microsoft.card.adaptive'
-                "content"     = [Ordered]@{
-                    '$schema' = "<http://adaptivecards.io/schemas/adaptive-card.json>"
-                    "type"    = "AdaptiveCard"
-                    "version" = "1.2"
-                    "body"    = @(
-                        @{
-                            "type"  = "Container"
-                            "style" = $ContainerStyle
-                            "items" = @(
-                                @{
-                                    "type"     = "TextBlock"
-                                    "text"     = $CardSubject
-                                    "size"     = "Large"
-                                    "weight"   = "Bolder"
-                                    "isSubtle" = $true
-                                    "wrap"     = $true
-                                }
-                                $TeamObject
-                            )
-                        }
-                    )
-                }
-            }
-        )
-    } | ConvertTo-Json -Depth 20
-
-    Write-Output "`n  JSON body:`n"
-    $webhookBody
-
-    $whResponse = Invoke-RestMethod -Method Post -Uri $Uri -Body $webhookBody -Verbose -Headers $webhookHeaders -TimeoutSec 45
-    Write-Output "`n Response:"    
-    $whResponse | Format-Table -AutoSize -ErrorAction SilentlyContinue
-
-}
-
 function Sync-GroupMailboxDelegation {
     <#
     .SYNOPSIS
@@ -560,12 +411,6 @@ function Sync-GroupMailboxDelegation {
         $Permissions = @("FullAccess", "SendAs"),
         [Parameter()]
         [string]
-        $AADCertificateThumbprint = $AADCertificateThumbprint,
-        [parameter()]
-        [string]
-        $ExchangeClientAppId = $ExchangeClientAppId,
-        [Parameter()]
-        [string]
         $TenantId = $TenantId,
         [switch]$DoNotConnect
 
@@ -578,7 +423,7 @@ function Sync-GroupMailboxDelegation {
         if ([string]::IsNullOrWhiteSpace($GroupId)) {
             $GroupId = (Get-MgGroup -Filter "DisplayName eq '$GroupDisplayName'" -ErrorAction SilentlyContinue).Id
         }
-        #Write-Output $GroupDisplayName $groupid
+
         $output = @()
         if ($GroupId) {
             Get-MgGroupMember -GroupId $GroupId -All | ForEach-Object { 
@@ -594,11 +439,8 @@ function Sync-GroupMailboxDelegation {
         return $output
     }
 
-    # We should already be connected to Graph here so no need to do it again. Perhaps check for connection and if not do it again.
-    # Connect-MgGraph -TenantId $TenantID -CertificateThumbprint $AADCertificateThumbprint -ClientId $ExchangeClientAppId
-
     if ($DoNotConnect.IsPresent -eq $false) {
-        Connect-ExchangeOnline -CertificateThumbprint $AADCertificateThumbprint -AppId $ExchangeClientAppId -Organization $TenantId -ShowBanner:$false | Out-Null
+        Connect-ExchangeOnline -ManagedIdentity -Organization $TenantId -ShowBanner:$false | Out-Null
     }
 
     # Find the shared mailbox
@@ -612,14 +454,16 @@ function Sync-GroupMailboxDelegation {
     }
 
     Write-Log "`t$DelegateMailbox matched with $($mObj) $($mObj.Identity) " -Severity Debug
-    
+    Connect-MgGraph -Identity -NoWelcome
     $gMembers = Get-MgGroupMemberRecursively -GroupDisplayName $Group | Sort-Object -Property Id -Unique
     Write-Log " $group member count: $($gMembers.Count)" -Severity Debug
 
     if ($Permissions -contains "FullAccess") {
 
         $existingFullAccessPermissions = Get-ExoMailboxPermission -Identity $mObj.identity | Sort-Object -Property User -Unique | Where-Object { $_.User -notlike "*SELF" } | Sort-Object -Unique -Property User | Foreach-object { Get-MgUser -UserId $_.User }
-        $cPermissions = Compare-Object -ReferenceObject $existingFullAccessPermissions -DifferenceObject $gMembers -Property Id
+        if ($gMembers) {
+            $cPermissions = Compare-Object -ReferenceObject $existingFullAccessPermissions -DifferenceObject $gMembers -Property Id -ErrorAction SilentlyContinue
+        }
         $missingPermissions = $cPermissions | Where-Object -Property SideIndicator -EQ "=>"
         Write-Log " Missing perms: $($missingPermissions.Count + 0)" -Severity Debug
         $extraPermissions = $cPermissions | Where-Object -Property SideIndicator -EQ "<="
@@ -658,7 +502,9 @@ function Sync-GroupMailboxDelegation {
     if ($Permissions -contains "SendAs") {
         
         $existingSendAsPermissions = Get-ExoRecipientPermission -Identity $mObj.identity | Where-Object { $_.Trustee -like "*@*" -and $_.AccessControlType -eq "Allow" -and $_.AccessRights -contains "SendAs" } | Sort-Object -Property Trustee -Unique | ForEach-Object { Get-MgUser -UserId $_.Trustee }
-        $cPermissions = Compare-Object -ReferenceObject $existingSendAsPermissions -DifferenceObject $gMembers -Property Id
+        if ($gMembers) {
+            $cPermissions = Compare-Object -ReferenceObject $existingSendAsPermissions -DifferenceObject $gMembers -Property Id -ErrorAction SilentlyContinue
+        }
         $missingPermissions = $cPermissions | Where-Object -Property SideIndicator -EQ "=>"
         $extraPermissions = $cPermissions | Where-Object -Property SideIndicator -EQ "<="
         if (($missingPermissions.Count + 0) -gt 0) {
@@ -689,17 +535,53 @@ function Sync-GroupMailboxDelegation {
     }
 }
 
+#Import-Module Microsoft.Graph.Users | Out-Null
+#Import-Module Microsoft.Graph.Users.Actions | Out-Null
+#Import-Module Microsoft.Graph.Identity.DirectoryManagement | Out-Null
+#Import-Module ExchangeOnlineManagement
+#Import-Module PSTeams | Out-Null
 
-Import-Module Microsoft.Graph.Users
-Import-Module Microsoft.Graph.Users.Actions
-Import-Module Microsoft.Graph.Identity.DirectoryManagement
-# Connect will import the module for us, no need to do this now.
-# Import-Module ExchangeOnlineManagement
-Import-Module PSTeams
+Write-Log -Message "Executing Connect-MgGraph -TenantId $TenantID" -Severity Debug
+
+# Ensures you do not inherit an AzContext in your runbook
+Disable-AzContextAutosave -Scope Process
+
+# Connect to Azure with system-assigned managed identity
+$AzureContext = (Connect-AzAccount -Identity).context
+
+# Set and store context
+$AzureContext = Set-AzContext -SubscriptionName $AzureContext.Subscription -DefaultProfile $AzureContext
+
+# Connect to Microsoft Graph
+Connect-MgGraph -Identity -NoWelcome
+$testUser = Get-MgUser -UserId $AdminEmailAddress
+if ([string]::IsNullOrWhiteSpace($testUser)) {
+    Write-Log -Message "Unable to obtain user information using Get-MgUser -UserId $AdminEmailAddress" -Severity Error
+    exit 1
+}
+
+if ([string]::IsNullOrWhiteSpace($BambooHrApiKey)) {  
+    $BambooHrApiKey = Get-AutomationVariable -Name 'BambooHrApiKey'
+}
+if ([string]::IsNullOrWhiteSpace($BhrCompanyName)) {  
+    $BhrCompanyName = Get-AutomationVariable -Name 'BhrCompanyName'
+}
+if ([string]::IsNullOrWhiteSpace($CompanyName)) {  
+    $CompanyName = Get-AutomationVariable -Name 'CompanyName'
+}
+if ([string]::IsNullOrWhiteSpace($TeamsCardUri)) {  
+    $TeamsCardUri = Get-AutomationVariable -Name 'TeamsCardUri'
+}
+if ([string]::IsNullOrWhiteSpace($TenantId)) {  
+    $TenantId = Get-AutomationVariable -Name 'TenantId'
+}
 
 # Check if variables are not set. If there is an environment variable, set its value to the variable. Used as an Azure Function
 if ([string]::IsNullOrWhiteSpace($BambooHrApiKey) -and [string]::IsNullOrWhiteSpace($env:BambooHrApiKey)) {
     Write-Log "BambooHR API Key not defined" -Severity Error
+    New-AdaptiveCard {  
+        New-AdaptiveTextBlock -Text "BambooHR API Key not defined" -Weight Bolder -Wrap     
+    } -Uri $TeamsCardUri -Speak "BhrAadSync error: BambooHR API Key not defined"
     exit
 }
 elseif ([string]::IsNullOrWhiteSpace($AdminEmailAddress) -and (-not [string]::IsNullOrWhiteSpace($env:BambooHrApiKey))) {
@@ -708,6 +590,9 @@ elseif ([string]::IsNullOrWhiteSpace($AdminEmailAddress) -and (-not [string]::Is
 
 if ([string]::IsNullOrWhiteSpace($AdminEmailAddress) -and [string]::IsNullOrWhiteSpace($env:AdminEmailAddress)) {
     Write-Log "Admin Email Address not defined" -Severity Error
+    New-AdaptiveCard {  
+        New-AdaptiveTextBlock -Text "Admin Email Address not defined" -Weight Bolder -Wrap    
+    } -Uri $TeamsCardUri -Speak "BhrAadSync error: Admin Email Address not defined"
     exit
 }
 elseif ([string]::IsNullOrWhiteSpace($AdminEmailAddress) -and (-not [string]::IsNullOrWhiteSpace($env:AdminEmailAddress))) {
@@ -716,6 +601,9 @@ elseif ([string]::IsNullOrWhiteSpace($AdminEmailAddress) -and (-not [string]::Is
 
 if ([string]::IsNullOrWhiteSpace($BHRCompanyName) -and [string]::IsNullOrWhiteSpace($env:BHRCompanyName)) {
     Write-Log "BambooHR company name not defined" -Severity Error
+    New-AdaptiveCard {  
+        New-AdaptiveTextBlock -Text "BambooHR company name not defined" -Weight Bolder -Wrap    
+    } -Uri $TeamsCardUri -Speak "BhrAadSync error: BambooHR company name not defined"
     exit
 }
 elseif ([string]::IsNullOrWhiteSpace($BHRCompanyName) -and (-not [string]::IsNullOrWhiteSpace($env:BHRCompanyName))) {
@@ -724,6 +612,9 @@ elseif ([string]::IsNullOrWhiteSpace($BHRCompanyName) -and (-not [string]::IsNul
 
 if ([string]::IsNullOrWhiteSpace($CompanyName) -and [string]::IsNullOrWhiteSpace($env:CompanyName)) {
     Write-Log "Company name not defined" -Severity Error
+    New-AdaptiveCard {  
+        New-AdaptiveTextBlock -Text "Company name not defined" -Weight Bolder -Wrap    
+    } -Uri $TeamsCardUri -Speak "BhrAadSync error: Company name not defined"
     exit
 }
 elseif ([string]::IsNullOrWhiteSpace($CompanyName) -and (-not [string]::IsNullOrWhiteSpace($env:CompanyName))) {
@@ -732,6 +623,9 @@ elseif ([string]::IsNullOrWhiteSpace($CompanyName) -and (-not [string]::IsNullOr
 
 if ([string]::IsNullOrWhiteSpace($TenantID) -and [string]::IsNullOrWhiteSpace($env:TenantID)) {
     Write-Log "TenantId not defined" -Severity Error
+    New-AdaptiveCard {  
+        New-AdaptiveTextBlock -Text "TenantId not defined" -Weight Bolder -Wrap    
+    } -Uri $TeamsCardUri -Speak "BhrAadSync error: TenantId not defined"
     exit
 }
 elseif ([string]::IsNullOrWhiteSpace($TenantID) -and (-not [string]::IsNullOrWhiteSpace($env:TenantID))) {
@@ -739,35 +633,6 @@ elseif ([string]::IsNullOrWhiteSpace($TenantID) -and (-not [string]::IsNullOrWhi
     $env:AZURE_TENANT_ID = $TenantId
 }
 
-if ([string]::IsNullOrWhiteSpace($AADCertificateThumbprint) -and [string]::IsNullOrWhiteSpace($env:AADCertificateThumbprint)) {
-    Write-Log "AAD Certificate thumbprint not defined" -Severity Error
-    exit
-}
-elseif ([string]::IsNullOrWhiteSpace($AADCertificateThumbprint) -and (-not [string]::IsNullOrWhiteSpace($env:AADCertificateThumbprint))) {
-    $AADCertificateThumbprint = $env:AADCertificateThumbprint
-
-}
-
-if ([string]::IsNullOrWhiteSpace($AzureClientAppId) -and [string]::IsNullOrWhiteSpace($env:AzureClientAppId)) {
-    Write-Log "Azure Client App Id not defined" -Severity Error
-    exit
-}
-elseif ([string]::IsNullOrWhiteSpace($AzureClientAppId) -and (-not [string]::IsNullOrWhiteSpace($env:AzureClientAppId))) {
-    $AzureClientAppId = $env:AzureClientAppId
-    $env:AZURE_CLIENT_ID = $AzureClientAppId
-}
-
-if ([string]::IsNullOrWhiteSpace($ExchangeClientAppId) -and [string]::IsNullOrWhiteSpace($env:ExchangeClientAppId)) {
-    Write-Log "Exchange Client App Id not defined" -Severity Error
-    exit
-}
-elseif ([string]::IsNullOrWhiteSpace($ExchangeClientAppId) -and (-not [string]::IsNullOrWhiteSpace($env:ExchangeClientAppId))) {
-    $ExchangeClientAppId = $env:ExchangeClientAppId
-    
-}
-
-#$graphClientAppId = $AzureClientAppId.Replace("-", "")
-#$aadCustomDataExtensionName = "extension_$($graphClientAppId)_bhrLastUpdated" 
 $companyEmailDomain = $AdminEmailAddress.Split("@")[1]
 $bhrRootUri = "https://api.bamboohr.com/api/gateway.php/$($BHRCompanyName)/v1"
 $bhrReportsUri = $bhrRootUri
@@ -781,15 +646,18 @@ else {
 }
 
 $runtime = Measure-Command -Expression {
-    Write-Log -Message "Starting BambooHR to Entra Id synchronization at $(Get-Date)" -Severity Debug
-    # Provision users to Entra using the employee details from BambooHR
-    Write-Log -Message "Executing Connect-MgGraph -TenantId $TenantID  ..." -Severity Debug
-    Connect-MgGraph -TenantId $TenantID -CertificateThumbprint $AADCertificateThumbprint -ClientId $AzureClientAppId
+    Write-Log -Message "Starting BambooHR to Entra AD synchronization at $(Get-Date)" -Severity Debug
+    # Provision users to AAD using the employee details from BambooHR
+    
+
+    #Connect-MgGraph -TenantId $TenantID -CertificateThumbprint $AADCertificateThumbprint -ClientId $AzureClientAppId
     # Getting all users details from BambooHR and passing the extracted info to the variable $employees
+    
     $headers = @{}
     $headers.Add("Content-Type", "application/json")
     $headers.Add("Authorization", "Basic $([Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("$($BambooHrApiKey):x")))")
     $error.clear()
+
     try {
         Invoke-RestMethod -Uri $bhrReportsUri -Method POST -Headers $headers -ContentType 'application/json' `
             -Body '{"fields":["status","hireDate","department","employeeNumber","firstName","lastName","displayName","jobTitle","supervisorEmail","workEmail","lastChanged","employmentHistoryStatus","bestEmail","location","workPhone","preferredName","homeEmail","mobilePhone"]}' `
@@ -798,7 +666,7 @@ $runtime = Measure-Command -Expression {
     catch {
         # If error returned, the API call to BambooHR failed and no usable employee data has been returned, write to log file and exit script
              
-        Write-Log -Message "Error calling BambooHr API for user information. `nEXCEPTION MESSAGE: $($_.Exception.Message) `n CATEGORY: $($_.CategoryInfo.Category) `n SCRIPT STACK TRACE: $($_.ScriptStackTrace)" -Severity Error
+        Write-log -Message "Error calling BambooHr API for user information. `nEXCEPTION MESSAGE: $($_.Exception.Message) `n CATEGORY: $($_.CategoryInfo.Category) `n SCRIPT STACK TRACE: $($_.ScriptStackTrace)" -Severity Error
         #Send email alert with the generated error
         $params = @{
             Message         = @{
@@ -819,13 +687,11 @@ $runtime = Measure-Command -Expression {
         }
 
         Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress -Verbose
-        New-AdaptiveCard {  
-
+        New-AdaptiveCard {
             New-AdaptiveTextBlock -Text "BambooHR API connection failed!" -Weight Bolder -Wrap -Color Red
             New-AdaptiveTextBlock -Text "Exception Message $($_.Exception.Message)" -Wrap
             New-AdaptiveTextBlock -Text "Category: $($_.CategoryInfo.Category)" -Wrap
-            New-AdaptiveTextBlock -Text "SCRIPT STACK TRACE: $($_.ScriptStackTrace)" -Wrap       
-        
+            New-AdaptiveTextBlock -Text "SCRIPT STACK TRACE: $($_.ScriptStackTrace)" -Wrap
         } -Uri $TeamsCardUri -Speak "BhrAadSync error: BambooHR connection failed"
         #Send-TeamsCard -CardSubject "BhrAadSync error: BambooHR connection failed"  -Message "BambooHR connection failed. <br/> EXCEPTION MESSAGE: $($_.Exception.Message) <br/>CATEGORY: $($_.CategoryInfo.Category) <br/> SCRIPT STACK TRACE: $($_.ScriptStackTrace) `n $EmailSignature"
         exit
@@ -833,12 +699,12 @@ $runtime = Measure-Command -Expression {
 
     # If no error returned, it means that the script was not interrupted by the "Exit" command within the "Catch" block. Write info below to log file and continue
     Write-Log -Message "Successfully extracted employee information from BambooHR." -Severity Debug
-  
+
     # Saving only the employee data to $employees variable and eliminate $response variable to save memory
     $employees = $response.employees
     $response = $null
 
-    # Connect to Entra Id using PS Graph Module, authenticating as the configured service principal for this operation, with certificate auth
+    # Connect to AAD using PS Graph Module, authenticating as the configured service principal for this operation, with certificate auth
     $error.Clear()
 
     if ($?) {
@@ -848,7 +714,7 @@ $runtime = Measure-Command -Expression {
     else {
 
         # If error returned, write to log file and exit script
-        Write-Log -Message "Connection to Entra failed.`n EXCEPTION: $($error.Exception) `n CATEGORY: $($error.CategoryInfo) `n ERROR ID: $($error.FullyQualifiedErrorId) `n SCRIPT STACK TRACE: $($error.ScriptStackTrace)" -Severity Error
+        Write-Log -Message "Connection to AAD failed.`n EXCEPTION: $($error.Exception) `n CATEGORY: $($error.CategoryInfo) `n ERROR ID: $($error.FullyQualifiedErrorId) `n SCRIPT STACK TRACE: $($error.ScriptStackTrace)" -Severity Error
 
         # Send email alert with the generated error 
         $params = @{
@@ -881,16 +747,13 @@ $runtime = Measure-Command -Expression {
         
         } -Uri $TeamsCardUri -Speak "BhrAadSync error: Graph connection failed"
 
-        #Send-TeamsCard -CardSubject "BhrAadSync error: Graph connection failed" -Message "<br/><br/>AAD connection failed.<br/>EXCEPTION: $($error.Exception) <br/> CATEGORY:$($error.CategoryInfo) <br/> ERROR ID: $($error.FullyQualifiedErrorId) <br/>SCRIPT STACK TRACE: $mgErrStack <br/> $EmailSignature"
         Disconnect-MgGraph
         Exit
     }
 
-
-
     Write-Log -Message "Looping through $($employees.Count) users." -Severity Debug
     Write-Log -Message "Removing employee records that do not have a company email address of $companyEmailDomain" -Severity Debug
-    
+
     # Only select employees with a company email.
     $employees | Sort-Object -Property LastName | Where-Object { $_.workEmail -like "*$companyEmailDomain" } | ForEach-Object {
         $error.Clear()
@@ -911,7 +774,7 @@ $runtime = Measure-Command -Expression {
         # Current status of the employee: Active, Terminated and if contains "Suspended" is in "maternity leave"
         $bhrEmploymentStatus = "$($_.employmentHistoryStatus)"
         $bhrEmployeeId = "$($_.id)"
-        # Translating user "status" from BambooHR to boolean, to match and compare with the Entra user account status
+        # Translating user "status" from BambooHR to boolean, to match and compare with the AAD user account status
         $bhrStatus = "$($_.status)"
         if ($bhrStatus -eq "Inactive")
         { $bhrAccountEnabled = $False }
@@ -933,7 +796,7 @@ $runtime = Measure-Command -Expression {
         $bhrLastName = (get-culture).textinfo.ToTitleCase($bhrLastName).Trim()
         $bhrDisplayName = (get-culture).textinfo.ToTitleCase($bhrDisplayName).Trim()
         $bhrHomeEmail = "$($homeEmail)"
- 
+
         if ($bhrPreferredName -ne $bhrFirstName -and [string]::IsNullorWhitespace($bhrPreferredName) -eq $false) {
             Write-Log -Message "User preferred first name of $bhrPreferredName instead of legal name $bhrFirstName" -Severity Debug
             $bhrFirstName = $bhrPreferredName
@@ -950,19 +813,19 @@ $runtime = Measure-Command -Expression {
         
         <#
             If the user start date is in the past, or in less than -DaysAhead days from current time, we can begin processing the user: 
-            create Entra account or correct the attributes in Entra for the employee, else, the employee found on BambooHR will not be processed
+            create AAD account or correct the attributes in AAD for the employee, else, the employee found on BambooHR will not be processed
         #>
 
         if (([datetime]$bhrHireDate) -le (Get-Date).AddDays($DaysAhead)) {
-            
+
             $error.clear()
-    
-            # Check if the user exists in Entra and if there is an account with the EmployeeID of the user checked in the current loop
-            Write-Log -Message "Validating $bhrWorkEmail Entra Id account." -Severity Debug
+
+            # Check if the user exists in AAD and if there is an account with the EmployeeID of the user checked in the current loop
+            Write-Log -Message "Validating $bhrWorkEmail AAD account." -Severity Debug
             Get-MgUser -UserId $bhrWorkEmail -Property id, userprincipalname, Department, EmployeeId, JobTitle, CompanyName, Surname, GivenName, DisplayName, AccountEnabled, Mail, EmployeeHireDate, OfficeLocation, BusinessPhones, MobilePhone, OnPremisesExtensionAttributes, AdditionalProperties -ExpandProperty manager -ErrorAction SilentlyContinue -OutVariable aadUpnObjDetails
             Get-MgUser -Filter "employeeID eq '$bhrEmployeeNumber'" -Property employeeid, userprincipalname, Department, JobTitle, CompanyName, Surname, GivenName, DisplayName, MobilePhone, AccountEnabled, Mail, OfficeLocation, BusinessPhones , EmployeeHireDate, OnPremisesExtensionAttributes, AdditionalProperties -ExpandProperty manager -ErrorAction SilentlyContinue -OutVariable aadEidObjDetails
             $error.clear()
-            
+
             if ([string]::IsNullOrEmpty($aadUpnObjDetails) -eq $false) {
                 $UpnExtensionAttribute1 = ($aadUpnObjDetails | Select-Object @{Name = 'ExtensionAttribute1'; Expression = { $_.OnPremisesExtensionAttributes.ExtensionAttribute1 } } -ErrorAction SilentlyContinue).ExtensionAttribute1
             }
@@ -971,7 +834,7 @@ $runtime = Measure-Command -Expression {
                 $EIDExtensionAttribute1 = ($aadEidObjDetails | Select-Object @{Name = 'ExtensionAttribute1'; Expression = { $_.OnPremisesExtensionAttributes.ExtensionAttribute1 } } -ErrorAction SilentlyContinue).ExtensionAttribute1
             }
 
-            # Saving Entra attributes to be compared one by one with the details pulled from BambooHR
+            # Saving AAD attributes to be compared one by one with the details pulled from BambooHR
             $aadWorkEmail = "$($aadUpnObjDetails.Mail)"
             $aadJobTitle = "$($aadUpnObjDetails.JobTitle)"
             $aadDepartment = "$($aadUpnObjDetails.Department)"
@@ -986,22 +849,21 @@ $runtime = Measure-Command -Expression {
             $aadWorkPhone = "$($aadUpnObjDetails.BusinessPhones)"
             $aadMobilePhone = "$($aadUpnObjDetails.MobilePhone)"
             $aadOfficeLocation = "$($aadUpnObjDetails.OfficeLocation)"
-            # $aadEmployeeType = ()
-            
+
             # Clean up phone info to make it easier to work with
             [string]$bhrWorkPhone = [int64]($bhrWorkPhone -replace '[^0-9]', '') -replace '^1', ''
             [string]$aadWorkPhone = [int64]($aadWorkPhone -replace '[^0-9]', '') -replace '^1', ''
             [string]$bhrMobilePhone = [int64]($bhrMobilePhone -replace '[^0-9]', '') -replace '^1', ''
             [string]$aadMobilePhone = [int64]($aadMobilePhone -replace '[^0-9]', '') -replace '^1', ''
-            
+
             if ($aadUpnObjDetails.EmployeeHireDate) {
                 $aadHireDate = $aadUpnObjDetails.EmployeeHireDate.AddHours(12).ToString("yyyy-MM-dd") 
             }        
-            
-            Write-Log -Message "Entra Id Upn Obj Details: '$([string]::IsNullOrEmpty($aadUpnObjDetails) -eq $false)' AadEidObjDetails: $([string]::IsNullOrEmpty($aadEidObjDetails) -eq $false) = $(([string]::IsNullOrEmpty($aadUpnObjDetails) -eq $false) -or ([string]::IsNullOrEmpty($aadEidObjDetails) -eq $false))" -Severity Debug
+
+            Write-Log -Message "AAD Upn Obj Details: '$([string]::IsNullOrEmpty($aadUpnObjDetails) -eq $false)' AadEidObjDetails: $([string]::IsNullOrEmpty($aadEidObjDetails) -eq $false) = $(([string]::IsNullOrEmpty($aadUpnObjDetails) -eq $false) -or ([string]::IsNullOrEmpty($aadEidObjDetails) -eq $false))" -Severity Debug
 
             if (([string]::IsNullOrEmpty($aadUpnObjDetails) -eq $false) -or ([string]::IsNullOrEmpty($aadEidObjDetails) -eq $false)) {
-                Write-Log -Message "Entra user: $aadFirstName $aadLastName ($aadDisplayName) $aadWorkEmail" -Severity Debug 
+                Write-Log -Message "Entra Id user: $aadFirstName $aadLastName ($aadDisplayName) $aadWorkEmail" -Severity Debug 
                 Write-Log -Message "Department: $aadDepartment, Title: $aadJobTitle, Manager: $aadSupervisorEmail, HireDate: $aadHireDate" -Severity Debug
                 Write-Log -Message "EmployeeId: $aadEmployeeNumber, Enabled: $aadStatus OfficeLocation: $aadOfficeLocation, WorkPhone: $aadWorkPhone" -Severity Debug
 
@@ -1020,8 +882,8 @@ $runtime = Measure-Command -Expression {
                 # This may not be needed anymore.
                 if (($aadEmployeeNumber -ne $bhrEmployeeNumber) -and ($aadUpnObjDetails.UserPrincipalName -eq $bhrWorkEmail) -and `
                         $bhrEmploymentStatus -notlike "*suspended*" -and $bhrLastChanged -ne $UpnExtensionAttribute1) { 
-                    # Employee number in Entra does not match the one in BambooHR, but the UPN matches. Update the employee number in AAD.
-                    Write-Log -Message "Employee number in Entra Id $aadEmployeeNumber does not match the one in BambooHR $bhrEmployeeNumber, but the UPN matches. Update the employee number in Entra Id." -Severity Debug
+                    # Employee number in Entra Id does not match the one in BambooHR, but the UPN matches. Update the employee number in AAD.
+                    Write-Log -Message "Entra Id Employee number $aadEmployeeNumber does not match BambooHR $bhrEmployeeNumber, but the UPN matches. Update the employee number in AAD." -Severity Debug
                     $error.clear()
                     if ($TestOnly.IsPresent) {
                         Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -EmployeeId $bhremployeeNumber" -Severity Test
@@ -1040,9 +902,8 @@ $runtime = Measure-Command -Expression {
                         $bhrLastChanged -ne $UpnExtensionAttribute1 -and `
                     ($aadEidObjDetails.Capacity -ne 0) -or ($aadUpnObjDetails.Capacity -ne 0) -and `
                         $bhrEmploymentStatus -notlike "*suspended*" ) { 
-                
-                    
-                    Write-Log  -Message "$bhrWorkEmail is a valid Entra Account, with matching EmployeeId and UPN in Entra and BambooHR, but different last modified date." -Severity Debug
+
+                    Write-Log -Message "$bhrWorkEmail is a valid AAD Account, with matching EmployeeId and UPN in AAD and BambooHR, but different last modified date." -Severity Debug
                     $error.clear() 
 
                     # Check if user is active in BambooHR, and set the status of the account as it is in BambooHR (active or inactive)
@@ -1053,7 +914,6 @@ $runtime = Measure-Command -Expression {
                         if ($TestOnly.IsPresent) {
                             Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -AccountEnabled:$bhrAccountEnabled" -Severity Test
                             Write-Log -Message "Executing: Revoke-MgUserSignInSession -UserId $bhrWorkEmail" -Severity Test
-                            
                         }
                         else {
                             Write-Log -Message "Executing: Revoke-MgUserSignInSession -UserId $bhrWorkEmail" -Severity Debug
@@ -1083,10 +943,10 @@ $runtime = Measure-Command -Expression {
                             Write-Log -Message "Executing: Set-Mailbox -Identity $bhrWorkEmail -Type Shared" -Severity Test
                             # Give permissions to converted mailbox to previous manager
                             Write-log "Executing: Add-MailboxPermission -Identity $($mObj.Id) -User $aadSupervisorEmail -AccessRights ‘FullAccess’ -Automapping:$true –inheritancetype All" -Severity Test                            
-                            
+
                             Write-Log -Message "Removing licenses..." -Severity Test
                             Write-Log -Message "Executing: Get-MgUserLicenseDetail -UserId $bhrWorkEmail | ForEach-Object { Set-MgUserLicense -UserId $bhrWorkEmail -RemoveLicenses $_.SkuId -AddLicenses @{} }" -Severity Test
-                        
+
                             Write-Log -Message "Remove group memberships" -Severity Test
                             Write-Log -Message "Executing: Get-MgUserMemberOf -UserId $bhrWorkEmail | ForEach-Object { Remove-MgGroupMemberByRef -GroupId $_.id -DirectoryObjectId $aadUpnObjDetails.id } " -Severity Test
 
@@ -1094,7 +954,7 @@ $runtime = Measure-Command -Expression {
 
                         }
                         else {
-                            
+
                             Write-Log -Message "User $bhrWorkEmail is no longer active in BambooHR, disabling Entra Id (AAD) account." -Severity Information
                             Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params"  -Severity Debug
                             Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params
@@ -1114,8 +974,8 @@ $runtime = Measure-Command -Expression {
                             }
 
                             # Convert mailbox to shared
-                            Connect-ExchangeOnline -CertificateThumbprint $AADCertificateThumbprint -AppId $ExchangeClientAppId -Organization $TenantId 
-                            #Connect-ExchangeOnline -Organization $TenantId 
+                            Connect-ExchangeOnline -ManagedIdentity -Organization $TenantId -ShowBanner:$false | Out-Null
+
                             Write-Log -Message "Executing: Set-Mailbox -Identity $bhrWorkEmail -Type Shared" -Severity Debug
                             Write-Log -Message "Converting $bhrWorkEmail to a shared mailbox..." -Severity Debug
                             Set-Mailbox -Identity $bhrWorkEmail -Type Shared
@@ -1140,21 +1000,24 @@ $runtime = Measure-Command -Expression {
                             # If user was a group owner, reassign ownership to someone else
                             # TODO
 
+                            # Reset/wipe the employees device(s)
+                            # TODO
+
                             # Remove Licenses
                             Write-Log -Message "Removing licenses..." -Severity Debug
-                            
+
                             Write-Log -Message "Executing: Get-MgUserLicenseDetail -UserId $bhrWorkEmail | ForEach-Object { Set-MgUserLicense -UserId $bhrWorkEmail -RemoveLicenses $_.SkuId -AddLicenses @{} }" -Severity Debug
                             Get-MgUserLicenseDetail -UserId $bhrWorkEmail | ForEach-Object { Set-MgUserLicense -UserId $bhrWorkEmail -RemoveLicenses $_.SkuId -AddLicenses @{} }
-                            
+
                             # Remove groups
                             Write-Log -Message "Removing group memberships" -Severity Debug
                             Write-Log -Message "Executing: Get-MgUserMemberOf -UserId $bhrWorkEmail | ForEach-Object { Remove-MgGroupMemberByRef -GroupId $_.id -DirectoryObjectId $aadUpnObjDetails.id } " -Severity Debug
-                            
+
                             Get-MgUserMemberOf -UserId $bhrWorkEmail | ForEach-Object { Remove-MgGroupMemberByRef -GroupId $_.id -DirectoryObjectId $aadUpnObjDetails.id -ErrorAction SilentlyContinue; Start-Sleep 10 } 
                             $methodID = Get-MgUserAuthenticationMethod -UserId $bhrWorkEmail | Select-Object id 
                             $methodsdata = Get-MgUserAuthenticationMethod -UserId $bhrWorkEmail | Select-Object -ExpandProperty AdditionalProperties
                             $methods_count = ($methodID | Measure-Object | Select-Object count).count
-                            
+
                             # Loop through and remove each authentication method
                             $error.Clear() 
 
@@ -1183,7 +1046,7 @@ $runtime = Measure-Command -Expression {
                                 }
                             }
                             else {
-                                Write-Log -Message " Account $bhrWorkEmail marked as inactive in BambooHR Entra account has been disabled, sessions revoked and removed MFA." -Severity Information              
+                                Write-Log -Message " Account $bhrWorkEmail marked as inactive in BambooHR AAD account has been disabled, sessions revoked and removed MFA." -Severity Information              
                                 $error.Clear()
                             }
                         }
@@ -1195,8 +1058,8 @@ $runtime = Measure-Command -Expression {
                         Write-Log "User account active, looking for user updates." -Severity Debug
   
                         if ($bhrAccountEnabled -eq $true -and $aadstatus -eq $false) {
-                            # The account is marked "Active" in BHR and "Inactive" in Entra, enable the Entraaccount
-                            Write-Log -Message "$bhrWorkEmail is marked Active in BHR and Inactive in Entra" -Severity Debug
+                            # The account is marked "Active" in BHR and "Inactive" in AAD, enable the AAD account
+                            Write-Log -Message "$bhrWorkEmail is marked Active in BHR and Inactive in AAD" -Severity Debug
 
                             #Change to a random pass
                             $newPas = (Get-NewPassword)
@@ -1221,13 +1084,15 @@ $runtime = Measure-Command -Expression {
                                 Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params
                             
                                 # Convert mailbox from shared to user mailbox
-                                Connect-ExchangeOnline -CertificateThumbprint $AADCertificateThumbprint -AppId $ExchangeClientAppId -Organization $TenantId 
-                                #Connect-ExchangeOnline -Organization $TenantId 
+                                Connect-ExchangeOnline -ManagedIdentity -Organization $TenantId -ShowBanner:$false | Out-Null
+
                                 Write-Log -Message "Executing: Set-Mailbox -Identity $bhrWorkEmail -Type Regular" -Severity Debug
                                 Write-Log -Message "Converting $bhrWorkEmail to a user mailbox..." -Severity Debug
                                 Set-Mailbox -Identity $bhrWorkEmail -Type Regular
+
                                 # Wait for mailbox to be converted
                                 Start-Sleep 60
+
                                 # Remove permissions to converted mailbox to previous manager
                                 $mObj = Get-ExoMailbox -anr $bhrWorkEmail
                                 Write-Log "`tShared permissions being revoked for $bhrWorkEmail..." -Severity Information
@@ -1273,15 +1138,15 @@ $runtime = Measure-Command -Expression {
                                     New-AdaptiveTextBlock -Text "Temporary Password: $newPas" -Wrap     
         
                                 } -Uri $TeamsCardUri -Speak "User Account Re-enabled: $bhrdisplayName"
-                               
-                                #  Send-TeamsCard -CardSubject "User Account Re-enabled: $bhrdisplayName" -Message " User name: $bhrWorkEmail <br/> Temporary Password: $newPas.`n $EmailSignature"
+            
+
                                 if (!$?) {
     
                                     Write-Log -Message " Could not activate user account. `n`nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
                                     $error.Clear()
                                 }
                                 else {
-                                    Write-Log -Message " Account $bhrWorkEmail marked as Active in BambooHR but Inactive in AAD. Enabled Entra Id account for sign-in." -Severity Information
+                                    Write-Log -Message " Account $bhrWorkEmail marked as Active in BambooHR but Inactive in AAD. Enabled AAD account for sign-in." -Severity Information
                                     $error.Clear()
                                 }                   
                             }
@@ -1292,7 +1157,7 @@ $runtime = Measure-Command -Expression {
                     
                         # Checking JobTitle if correctly set, if not, configure the JobTitle as set in BambooHR
                         if ($aadJobTitle.Trim() -ne $bhrJobTitle.Trim()) {
-                            Write-Log -Message "Entra Id Job Title $aadJobTitle does not match BHR Job Title $bhrJobTitle" -Severity Debug
+                            Write-Log -Message "AAD Job Title $aadJobTitle does not match BHR Job Title $bhrJobTitle" -Severity Debug
                     
                             if ($TestOnly.IsPresent) {
                         
@@ -1314,14 +1179,14 @@ $runtime = Measure-Command -Expression {
                                 }
                                 else {
                                     $error.Clear()
-                                    Write-Log -Message "JobTitle for $bhrWorkEmail in Entra set from '$aadjobTitle' to '$bhrjobTitle'." -Severity Information
+                                    Write-Log -Message "JobTitle for $bhrWorkEmail in AAD set from '$aadjobTitle' to '$bhrjobTitle'." -Severity Information
                                 }
                             }
                         }
 
                         # Checking department if correctly set, if not, configure the Department as set in BambooHR
                         if ($aadDepartment.Trim() -ne $bhrDepartment.Trim()) {
-                            Write-Log -Message "Entra department '$aadDepartment' does not match BambooHR department '$($bhrDepartment.Trim())'" -Severity Debug
+                            Write-Log -Message "AAD department '$aadDepartment' does not match BambooHR department '$($bhrDepartment.Trim())'" -Severity Debug
                             if ($TestOnly.IsPresent) {                   
                                 Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -Department $bhrDepartment" -Severity Test
                             }
@@ -1335,7 +1200,7 @@ $runtime = Measure-Command -Expression {
                                 }
                                 else {
                                     $error.Clear()
-                                    Write-Log -Message "Department for $bhrWorkEmail in Entra set from '$aadDepartment' to '$bhrDepartment'." -Severity Information
+                                    Write-Log -Message "Department for $bhrWorkEmail in AAD set from '$aadDepartment' to '$bhrDepartment'." -Severity Information
                                 }
                             }
                         }
@@ -1345,7 +1210,7 @@ $runtime = Measure-Command -Expression {
         
                         # Checking the manager if correctly set, if not, configure the manager as set in BambooHR
                         if ($aadSupervisorEmail -ne $bhrSupervisorEmail -and ([string]::IsNullOrWhiteSpace($bhrSupervisorEmail) -eq $false)) {
-                            Write-Log -Message "Manager in Entra '$aadSupervisorEmail' does not match BHR manager '$bhrSupervisorEmail'" -Severity Debug
+                            Write-Log -Message "Manager in AAD '$aadSupervisorEmail' does not match BHR manager '$bhrSupervisorEmail'" -Severity Debug
                     
                             $aadManagerID = (Get-MgUser -UserId $bhrSupervisorEmail | Select-Object id ).id 
                             $newManager = @{
@@ -1365,7 +1230,7 @@ $runtime = Measure-Command -Expression {
                                 }
                                 else {
                                     $error.Clear()
-                                    Write-Log -Message "Manager of $bhrWorkEmail in Entra '$aadsupervisorEmail' and in BambooHR '$bhrsupervisorEmail'. Setting new manager to the Azure User Object." -Severity Information
+                                    Write-Log -Message "Manager of $bhrWorkEmail in AAD '$aadsupervisorEmail' and in BambooHR '$bhrsupervisorEmail'. Setting new manager to the Azure User Object." -Severity Information
                                 }
                             }
                         }
@@ -1390,7 +1255,7 @@ $runtime = Measure-Command -Expression {
                                 }
                                 else {
                                     $error.Clear()
-                                    Write-Log -Message "Office location of $bhrWorkEmail in Entra changed from '$aadOfficeLocation' to '$bhrOfficeLocation'." -Severity Information
+                                    Write-Log -Message "Office location of $bhrWorkEmail in AAD changed from '$aadOfficeLocation' to '$bhrOfficeLocation'." -Severity Information
                                 }
                             }
                         }
@@ -1400,7 +1265,7 @@ $runtime = Measure-Command -Expression {
 
                         # Check and set the Employee Hire Date
                         if ($aadHireDate -ne $bhrHireDate) {
-                            Write-Log -Message "Entra hire date '$aadHireDate' does not match BHR hire data '$bhrHireDate'" -Severity Debug
+                            Write-Log -Message "AAD hire date '$aadHireDate' does not match BHR hire data '$bhrHireDate'" -Severity Debug
                             if ($TestOnly.IsPresent) {
                                        
                                 Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -EmployeeHireDate $bhrHireDate" -Severity Test
@@ -1415,7 +1280,7 @@ $runtime = Measure-Command -Expression {
                                 }
                                 else {
                                     $error.Clear()
-                                    Write-Log -Message "Hire date of $bhrWorkEmail changed from '$aadHireDate' in Entra and BHR '$bhrHireDate'." -Severity Information
+                                    Write-Log -Message "Hire date of $bhrWorkEmail changed from '$aadHireDate' in AAD and BHR '$bhrHireDate'." -Severity Information
                                 }
                             }
                         }
@@ -1425,10 +1290,9 @@ $runtime = Measure-Command -Expression {
                         
                         
                         # Check and set the work phone ignoring formatting
-
                         if (($aadWorkPhone) -ne ($bhrWorkPhone)) {
 
-                            Write-Log -Message "Entra work phone '$aadWorkPhone' does not match BHR '$bhrWorkPhone'" -Severity Debug
+                            Write-Log -Message "AAD work phone '$aadWorkPhone' does not match BHR '$bhrWorkPhone'" -Severity Debug
                             if ([string]::IsNullOrWhiteSpace($bhrWorkPhone)) {
                                 $bhrWorkPhone = "0"
                             }
@@ -1447,7 +1311,6 @@ $runtime = Measure-Command -Expression {
                                 }
                                 else {
                                     [string]$bhrWorkPhone = [int64]($bhrWorkPhone -replace '[^0-9]', '') -replace '^1', ''
-                                    #$bhrWorkPhone = "{0:(###) ###-####}" -f [int64]$bhrWorkPhone
                                     Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BusinessPhones $bhrWorkPhone" -Severity Debug
                                     Update-MgUser -UserId $bhrWorkEmail -BusinessPhones $bhrWorkPhone -ErrorAction SilentlyContinue | Out-Null
                                     
@@ -1513,7 +1376,7 @@ $runtime = Measure-Command -Expression {
 
                         # Compare user employee id with BambooHR and set it if not correct
                         if ($bhrEmployeeNumber.Trim() -ne $aadEmployeeNumber.Trim()) {
-                            Write-Log -Message " BHR employee number $bhrEmployeeNumber does not match Entra employee id $aadEmployeeNumber" -Severity Debug
+                            Write-Log -Message " BHR employee number $bhrEmployeeNumber does not match AAD employee id $aadEmployeeNumber" -Severity Debug
                             if ($TestOnly.IsPresent) {
                                 Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -EmployeeId $bhremployeeNumber  "
 
@@ -1527,7 +1390,7 @@ $runtime = Measure-Command -Expression {
                                     $error.Clear()
                                 }
                                 else {
-                                    Write-Log -Message " The ID $bhremployeeNumber has been set to $bhrWorkEmail Entra account." -Severity Warning
+                                    Write-Log -Message " The ID $bhremployeeNumber has been set to $bhrWorkEmail AAD account." -Severity Warning
                                     $error.Clear()
                                 }
                             }
@@ -1538,7 +1401,7 @@ $runtime = Measure-Command -Expression {
 
                         # Set Company name to $CompanyName"
                         if ($aadCompanyName.Trim() -ne $CompanyName.Trim()) {
-                            Write-Log -Message "Entra company name '$aadCompany' does not match '$CompanyName'" -Severity Debug
+                            Write-Log -Message "AAD company name '$aadCompany' does not match '$CompanyName'" -Severity Debug
                             if ($TestOnly.IsPresent) {
                     
                                 Write-Log -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -CompanyName $($CompanyName.Trim())" -Severity Information -Severity Test
@@ -1558,15 +1421,15 @@ $runtime = Measure-Command -Expression {
                             }
                         }
                         else {
-                            Write-Log -Message "Company name already matched in Entra and BHR $aadCompanyName" -Severity Debug
+                            Write-Log -Message "Company name already matched in AAD and BHR $aadCompanyName" -Severity Debug
                         }
 
                         # Set LastModified from BambooHR to ExtensionAttribute1 in AAD
 
                         if ($upnExtensionAttribute1 -ne $bhrLastChanged) {
                             # Setting the "lastchanged" attribute from BambooHR to ExtensionAttribute1 in AAD
-                            Write-Log -Message "Entra Extension Attribute '$upnExtensionAttribute1' does not match BHR last changed '$bhrLastChanged'" -Severity Debug
-                            Write-Log -Message "Set LastModified from BambooHR to ExtensionAttribute1 in Entra" -Severity Debug
+                            Write-Log -Message "AAD Extension Attribute '$upnExtensionAttribute1' does not match BHR last changed '$bhrLastChanged'" -Severity Debug
+                            Write-Log -Message "Set LastModified from BambooHR to ExtensionAttribute1 in AAD" -Severity Debug
                         
                             if ($TestOnly.IsPresent) {
                     
@@ -1574,7 +1437,7 @@ $runtime = Measure-Command -Expression {
                             }
                             else {
                                 Write-Log -Message "Executing: $null = Update-MgUser -UserId $bhrWorkEmail -OnPremisesExtensionAttributes @{extensionAttribute1 = '$bhrLastChanged' }" -Severity Debug
-                                # TODO: Does not work for on premises synched accounts. Not a problem with Entra native.
+                                # TODO: Does not work for on premises synched accounts. Not a problem with AAD native.
                                 $null = Update-MgUser -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrLastChanged } -UserId $bhrWorkEmail -ErrorAction SilentlyContinue | Out-Null
 
                                 if (!$?) {
@@ -1596,7 +1459,7 @@ $runtime = Measure-Command -Expression {
                 }
             }
             else {
-                Write-Log -Message "No Entra user found for $bhrWorkEmail" -Severity Debug
+                Write-Log -Message "No AAD user found for $bhrWorkEmail" -Severity Debug
                 
                 # This might not be needed anymore
                 $aadWorkEmail = ""
@@ -1626,7 +1489,7 @@ $runtime = Measure-Command -Expression {
                 $aadfirstName = $aadEidObjDetails.GivenName
                 $aadlastName = $aadEidObjDetails.Surname
 
-                Write-Log -Message "Evaluating if Entra name change is required for $aadfirstName $aadlastName ($aaddisplayname) `n`t Work Email: $aadWorkEmail UserPrincipalName: $aadUpn EmployeeId: $aadEmployeeNumber" -Severity Debug
+                Write-Log -Message "Evaluating if AAD name change is required for $aadfirstName $aadlastName ($aaddisplayname) `n`t Work Email: $aadWorkEmail UserPrincipalName: $aadUpn EmployeeId: $aadEmployeeNumber" -Severity Debug
            
                 $error.Clear()
                     
@@ -1639,24 +1502,16 @@ $runtime = Measure-Command -Expression {
                     }
                     else {
                         # Setting the "lastchanged" attribute from BambooHR to ExtensionAttribute1 in AAD
-                        # Write-Log -Message "The $bhrWorkEmail employee LastChanged attribute set to extensionAttribute1 as $bhrlastChanged." -Severity Information
                         Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged } " -Severity Debug
                         # This does not work for AD on premises synced accounts.
                         $null = Update-MgUser -UserId $aadObjectID -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged } -ErrorAction SilentlyContinue | Out-Null
                                             
-                        # if (!$?) {
-                        #     Write-Log -Message "Error changing ExtensionAttribute1.`n`nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
-                        #     $error.Clear()
-                        # }
-                        # else {
-                        #     Write-Log -Message "ExtensionAttribute1 changed to: $bhrlastChanged for employee $bhrWorkEmail." -Severity Information
-                        # }
                     }
                 }
 
-                # Change last name in Entra         
+                # Change last name in AAD         
                 if ($aadLastName -ne $bhrLastName) {
-                    Write-Log -Message " Last name in Entra $aadLastName does not match in BHR $bhrLastName" -Severity Debug
+                    Write-Log -Message " Last name in AAD $aadLastName does not match in BHR $bhrLastName" -Severity Debug
                     Write-Log -Message " Changing the last name of $bhrWorkEmail from $aadLastName to $bhrLastName." -Severity Debug
                     if ($TestOnly.IsPresent) {
                         Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -Surname $bhrLastName" -Severity Test
@@ -1667,7 +1522,7 @@ $runtime = Measure-Command -Expression {
                         
                         if (!$?) {
                               
-                            Write-Log -Message "Error changing Entra Last Name.`n`nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
+                            Write-Log -Message "Error changing AAD Last Name.`n`nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
                             $error.Clear()
                         }
                         else {
@@ -1698,7 +1553,7 @@ $runtime = Measure-Command -Expression {
            
                 # Change display name
                 if ($aadDisplayname -ne $bhrDisplayName) {
-                    Write-Log -Message "Entra Display Name $aadDisplayname is not equal to BHR $bhrDisplayName" -Severity Debug
+                    Write-Log -Message "AAD Display Name $aadDisplayname is not equal to BHR $bhrDisplayName" -Severity Debug
                     if ($TestOnly.IsPresent) {
                         Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -DisplayName $bhrdisplayName" -Severity Test
                     }
@@ -1719,7 +1574,7 @@ $runtime = Measure-Command -Expression {
 
                 # Change Email Address
                 if ($aadWorkEmail -ne $bhrWorkEmail) {
-                    Write-Log -Message "Entra work email $aadWorkEmail does not match BHR work email $bhrWorkEmail"
+                    Write-Log -Message "AAD work email $aadWorkEmail does not match BHR work email $bhrWorkEmail"
                     if ($TestOnly.IsPresent) {
                         Write-Log -Message "Executing: Update-MgUser -UserId $aadObjectID -Mail $bhrWorkEmail"
                     }
@@ -1798,7 +1653,6 @@ $runtime = Measure-Command -Expression {
                                 New-AdaptiveTextBlock -Text "The user's password has not been modified." -Wrap   
                             } -Uri $TeamsCardUri -Speak "Login changed for $bhrdisplayName"
 
-                            #Send-TeamsCard -CardSubject "Login changed for $bhrdisplayName" -Message "<p>An email address was changed in the $CompanyName BambooHR. Your user account has been changed accordingly.</p><ui><li>Use your new user name: $bhrWorkEmail</li><li>Your password has not been modified.</li></ul><br/><p>$EmailSignature</p>"
                         }
                     }
                 }
@@ -1807,7 +1661,7 @@ $runtime = Measure-Command -Expression {
 
             # Create new employee account
             if ($aadUpnObjDetails.Capacity -eq 0 -and $aadEidObjDetails.Capacity -eq 0 -and ($bhrAccountEnabled -eq $true)) {
-                Write-Log -Message "No Entra account exist but employee in bhr is $bhrAccountEnabled" -Severity Debug
+                Write-Log -Message "No AAD account exist but employee in bhr is $bhrAccountEnabled" -Severity Debug
 
                 if ([string]::IsNullOrWhiteSpace($LicenseId) -eq $false) {
 
@@ -1827,8 +1681,8 @@ $runtime = Measure-Command -Expression {
                                 
                 }
                 else {
-                    # Create Entra account, as it doesn't have one, if user hire date is less than $DaysAhead days in the future, or is in the past
-                    Write-Log -Message "$bhrWorkEmail does not have an Entra account and hire date ($bhrHireDate) is less than $DaysAhead days from now." -Severity Information
+                    # Create AAD account, as it doesn't have one, if user hire date is less than $DaysAhead days in the future, or is in the past
+                    Write-Log -Message "$bhrWorkEmail does not have an AAD account and hire date ($bhrHireDate) is less than $DaysAhead days from now." -Severity Information
                     
                     Write-Log -Message "Executing New-MgUser -EmployeeId $bhremployeeNumber -Department $bhrDepartment -CompanyName $CompanyName -Surname $bhrlastName -GivenName $bhrfirstName -DisplayName $bhrdisplayName -AccountEnabled -Mail $bhrWorkEmail -OfficeLocation $bhrOfficeLocation `
                         -EmployeeHireDate $bhrHireDate -UserPrincipalName $bhrWorkEmail -PasswordProfile $PasswordProfile -JobTitle $bhrjobTitle -MailNickname ($bhrWorkEmail -replace '@', '' -replace $companyEmailDomain, '' ) -UsageLocation $UsageLocation -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged }" -Severity Debug
@@ -1838,7 +1692,7 @@ $runtime = Measure-Command -Expression {
                         -JobTitle $bhrjobTitle -MailNickname ($bhrWorkEmail -replace '@', '' -replace $companyEmailDomain, '') `
                         -UsageLocation $UsageLocation -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged }
                     
-                    # Since we are setting up a new account lets use the image from the BambooHR profile and add it to the Entra Id account
+                    # Since we are setting up a new account lets use the image from the BambooHR profile and add it to the AAD account
                     Write-Log -Message "Retrieving user photo from BambooHR..." -Severity Information
                     $bhrEmployeePhotoUri = "$($bhrRootUri)/employees/$bhrEmployeeId/photo/large"
                     $profilePicPath = Join-Path -Path $env:temp -ChildPath "bhr-$($bhrEmployeeId).jpg"
@@ -1849,7 +1703,8 @@ $runtime = Measure-Command -Expression {
 
                     Write-Log "Reconnecting to Microsoft Graph..." -Severity Debug
                     $null = Disconnect-Mggraph | Out-Null
-                    Connect-MgGraph -TenantId $TenantID -CertificateThumbprint $AADCertificateThumbprint -ClientId $AzureClientAppId | Out-Null
+                    Connect-MgGraph -Identity -NoWelcome
+                    #Connect-MgGraph -TenantId $TenantID -CertificateThumbprint $AADCertificateThumbprint -ClientId $AzureClientAppId | Out-Null
                     Write-Log "Updating user account with BambooHR profile picture..." -Severity Information
                     $user = Get-MgUser -UserId $bhrWorkEmail -ErrorAction SilentlyContinue
                     Start-Sleep 120
@@ -1923,7 +1778,8 @@ $runtime = Measure-Command -Expression {
                             Write-Output "Waiting for mailbox setup before continuing"
                             Start-Sleep -Seconds 180
                             Write-Output "Evaluating shared mailbox permissions"
-                            Connect-ExchangeOnline -CertificateThumbprint $AADCertificateThumbprint -AppId $ExchangeClientAppId -Organization $TenantId -ShowBanner:$false | Out-Null
+                            #Connect-ExchangeOnline -CertificateThumbprint $AADCertificateThumbprint -AppId $ExchangeClientAppId -Organization $TenantId -ShowBanner:$false | Out-Null
+                            Connect-ExchangeOnline -ManagedIdentity -Organization $TenantId -ShowBanner:$false | Out-Null
                             foreach ($params in $MailboxDelegationParams) {
                                 Sync-GroupMailboxDelegation @params -DoNotConnect
                             }
@@ -1933,12 +1789,14 @@ $runtime = Measure-Command -Expression {
                                     Subject       = "Welcome, $bhrFirstName!"
                                     Body          = @{
                                         ContentType = "html"
-                                        Content     = "<br/><br/><p>Welcome to the company, $bhrFirstName!</p><br/>`
+                                        Content     = "<br/><br/><p>Welcome to $CompanyName, $bhrFirstName!</p><br/>`
                                         <p> $WelcomeUserText</p><br/>`
                                         <p> Your manager will provide more details about working with your team.</p>`
                                         <p>Additionally, below you will find some helpful links to get you started.</p>`
                                         <ul>`
-                                        <li><a href=''>Setting up your computer</a></li>`
+                                        <li><a href='https://support.microsoft.com/en-us/office/manage-meetings-ba44d0fd-da3c-4541-a3eb-a868f5e2b137'>Managing Teams Meetings</a></li>`
+                                        <li><a href='https://passwordreset.microsoftonline.com/'>Password reset without a computer</a></li>`
+                                        <li><a href='https://go.namedpipes.net/MfaReset'>Request Multifactor authentication reset</a></li>`
                                         <li><a href='https://outlook.office.com'>Accessing Outlook (Email) via Browser</a></li>`
                                         <li><a href='https://teams.microsoft.com'>Accessing Teams via Browser</a></li>`
                                         </ul><br/><p>$EmailSignature</p>"
@@ -2002,12 +1860,7 @@ $runtime = Measure-Command -Expression {
                                 New-AdaptiveTextBlock -Text "Password: $($PasswordProfile.Values)" -Wrap
                             } -Uri $TeamsCardUri -Speak "New User $bhrDisplayName Account Created"
 
-                            #Send-TeamsCard -CardSubject "New User Account $bhrDisplayName Created" -Message "<br/><p>New employee user account created for $bhrDisplayName. No manager account is currently active for this account so this info is being sent to the default location.`<p><ul><li>User name: $bhrWorkEmail</li><li>Password: $($PasswordProfile.Values)</li></ul></p><p>$EmailSignature</p>" -ContainerStyle default
                         }
-
-                        #Assigning the user to BambooHR enterprise app
-                        #$uid = (Get-MgUser -UserId $bhrWorkEmail | Select-Object ID).id 
-                        # New-MgUserAppRoleAssignment -UserId $uid -PrincipalId $uid -ResourceId 6b419818-6e25-4f9c-9268-1f0d2ef78700 -AppRoleId a8972ac9-2341-4879-9028-2a9d979844a0
 
                     }
                     else {
@@ -2050,7 +1903,6 @@ $runtime = Measure-Command -Expression {
                             New-AdaptiveTextBlock -Text "Stack: $($error.ScriptStackTrace)" -Wrap
                         } -Uri $TeamsCardUri -Speak "BHR-Sync Account Creation Error"
 
-                        #Send-TeamsCard -CardSubject "BHR-Sync Error" -Message "<p>Hello,</p><br/><p>Account creation for user: $bhrWorkEmail has failed. Please check the log: $logFileName for further details.<br/>The error information is  below. <ul><li>Error Message: $($error.Exception.Message)</li><li>Error Category: $($error.CategoryInfo)</li><li>Error ID: $($error.FullyQualifiedErrorId)</li><li>Stack: $($error.ScriptStackTrace)</li></ul></p><p>$EmailSignature</p>" -ContainerStyle warning
                     }
                 }
             }                    
@@ -2081,13 +1933,13 @@ if (($TestOnly.IsPresent -eq $false ) -and ([string]::IsNullOrWhiteSpace($Script
     New-AdaptiveCard {  
         New-AdaptiveTextBlock -Text "BHR Sync Successful" -Wrap -Weight Bolder
         $Script:logContent | ForEach-Object { $atb = $_.Replace("<p>", "").Replace("</p>", "").Replace("<br/>", "").Replace("<br>", ""); New-AdaptiveTextBlock -Text $atb -Wrap }
-    } -Uri $TeamsCardUri -Speak "BambooHR to Entra sync ran successfully!"
+    } -Uri $TeamsCardUri -Speak "BambooHR to AAD sync ran successfully!"
 
-    #Send-TeamsCard -Message "<p>BambooHR to Entra sync ran with the following results:</p><br/>$Script:LogContent<br/><br/>"
+    #Send-TeamsCard -Message "<p>BambooHR to AAD sync ran with the following results:</p><br/>$Script:LogContent<br/><br/>"
     Start-Sleep 30
     # Todo input these and an array and loop through only if needed.
 
-    Connect-ExchangeOnline -CertificateThumbprint $AADCertificateThumbprint -AppId $ExchangeClientAppId -Organization $TenantId -ShowBanner:$false | Out-Null
+    Connect-ExchangeOnline -ManagedIdentity -Organization $TenantId -ShowBanner:$false | Out-Null
     foreach ($params in $MailboxDelegationParams) {
         Sync-GroupMailboxDelegation @params -DoNotConnect
  
@@ -2095,7 +1947,8 @@ if (($TestOnly.IsPresent -eq $false ) -and ([string]::IsNullOrWhiteSpace($Script
 
 }
 else { 
-    Connect-ExchangeOnline -CertificateThumbprint $AADCertificateThumbprint -AppId $ExchangeClientAppId -Organization $TenantId -ShowBanner:$false | Out-Null
+
+    Connect-ExchangeOnline -ManagedIdentity -Organization $TenantId -ShowBanner:$false | Out-Null
     foreach ($params in $MailboxDelegationParams) {
         Sync-GroupMailboxDelegation @params -DoNotConnect
     }
@@ -2106,10 +1959,6 @@ else {
     }
     
     Write-Log -Message "`n Completed sync at $(Get-Date) and ran for $($runtime.Totalseconds) seconds" -Severity Information
-    #$noHTMLMessage = $Script:logContent.Replace("<p>", "").Replace("</p>", "").Replace("<br/>", "").Replace("<br>", "")
-    #Write-Log -Message "`nSync ran for $([math]::Round($runtime.Totalseconds,2)) seconds" -Severity Information
-    #Write-Log -Message "`nCompleted at $(Get-Date)" -Severity Information
-
 
     New-AdaptiveCard {  
         New-AdaptiveTextBlock -Text "BHR Sync Successful" -Wrap -Weight Bolder 
@@ -2117,13 +1966,13 @@ else {
             $atb = $_.Replace("<p>", "").Replace("</p>", "").Replace("<br/>", "").Replace("<br>", "");
             New-AdaptiveTextBlock -Text $atb -Wrap
         }
-    } -Uri $TeamsCardUri -Speak "BambooHR to Entra sync ran successfully!"
+    } -Uri $TeamsCardUri -Speak "BambooHR to AAD sync ran successfully!"
 
     Write-Log "No log content to share, no message sent" -Severity Debug
 
-    #Send-TeamsCard -Message "<p>BambooHR to Entra sync ran with the following results:</p><br/>$Script:LogContent<br/><br/>"
+    #Send-TeamsCard -Message "<p>BambooHR to AAD sync ran with the following results:</p><br/>$Script:LogContent<br/><br/>"
     if ($ForceSharedMailboxPermissions.IsPresent) {    
-        Connect-ExchangeOnline -CertificateThumbprint $AADCertificateThumbprint -AppId $ExchangeClientAppId -Organization $TenantId -ShowBanner:$false | Out-Null
+        Connect-ExchangeOnline -ManagedIdentity -Organization $TenantId -ShowBanner:$false | Out-Null
         foreach ($params in $MailboxDelegationParams) {
             Sync-GroupMailboxDelegation @params -DoNotConnect
         }
