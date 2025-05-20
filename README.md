@@ -6,7 +6,7 @@ User provisioning from BambooHR to Entra Id formerly known as Azure Active Direc
 
 This is a fork of the AMAZING work done by [PaulTony BHR-to-AzAd-user-Provisioning](https://github.com/PaulTony-coocoo/BHR-to-AzAD-user-provisioning). Their work saved me many hours having to put together this myself and I'm very grateful!
 
-Anyone is free to take what is here and I will happily contribute my changes back to the original author, if they find my ideas worthy. 
+Anyone is free to take what is here and I will happily contribute my changes back to the original author, if they find my ideas worthy.
 
 What is different about this from the original?
 
@@ -90,7 +90,7 @@ This section will keep track of changes made over time.
 
 ## Future ideas
 
-If you have suggestions or questions, feel free to reach out. 
+If you have suggestions or questions, feel free to reach out.
 
 - Add off boarding steps for things like:
   - One Drive for Business data access
@@ -98,32 +98,34 @@ If you have suggestions or questions, feel free to reach out.
   - Deleting disabled accounts after suitable waiting period.
   - Other suggestions
 
-
 ## Getting started
 
-This is part of Bamboo HR and Entra Id (Azure Active Directory) integration process. This will make sure employees have Entra Id accounts. This does not create or update on premises Active Directory Domain Services accounts. 
+This is part of Bamboo HR and Entra Id (Azure Active Directory) integration process. This will make sure employees have Entra Id accounts. This does not create or update on premises Active Directory Domain Services accounts.
 
 1. Create Azure AD Enterprise application for unattended auth using a certificate for Azure AD object management and Exchange Online management
- - Mail.Send
 
-2. Set the following variables: 
- - BambooHRApiKey - API key created in BambooHR
- - AdminEmailAddress - Email address to receive email alerts
- - CompanyName - Company name used for the URL to access BambooHR
- - TenantID - Microsoft Tenant Id
- - AADCertificateThumbPrint - Certificate thumbprint created for the application in AAD
- - AzAppClientID - Application created for Application.
+- Mail.Send
 
-3. Required modules: MGGraph 2.0, ExchangeOnlineManagement, PSTeams
+2. Set the following variables:
 
-> **IMPORTANT:** This is a sample solution and should be used by those comfortable testing, retesting, and validating before **thinking** about using it in production. This content is provided *AS IS* with *no* guarantees or assumptions of quality, functionality, or support. 
+- BambooHRApiKey - API key created in BambooHR
+- AdminEmailAddress - Email address to receive email alerts
+- CompanyName - Company name used for the URL to access BambooHR
+- TenantID - Microsoft Tenant Id
+- AADCertificateThumbPrint - Certificate thumbprint created for the application in AAD
+- AzAppClientID - Application created for Application.
 
-- You are responsible to comply with all applicable laws and regulations. 
+1. Required modules: MGGraph 2.0, ExchangeOnlineManagement, PSTeams
+
+> **IMPORTANT:** This is a sample solution and should be used by those comfortable testing, retesting, and validating before **thinking** about using it in production. This content is provided *AS IS* with *no* guarantees or assumptions of quality, functionality, or support.
+
+- You are responsible to comply with all applicable laws and regulations.
 - With great power comes great responsibility.
 - Friends don't let friends run untested directory scripts in production.
 - Don't take any wooden nickels.
 
 The script will extract the employee data from BambooHR and for each user and will run one of the following processes:
+
 1. Attribute corrections - if the user has an existing account , and is an active employee, and, the last changed time in Azure AD differs from BambooHR, then this first block will compare each of the AzAD User object attributes with the data extracted from BHR and correct them if necessary.
 2. Name changed - If the user has an existing account, but the name does not match with the one from BHR, then, this block will run and correct the user Name, UPN,	emailAddress.
 3. New employee, and there is no Entra Id account, this script block will create a new user with the data extracted from BHR.
@@ -163,15 +165,15 @@ Variables usage description:
 
 Initiate Script run time capture
 
- - Write-Log
- - New-Password
+- Write-Log
+- New-Password
 
 Extract Employee Data from BHR
 
-  - If BHR employee data extraction = successful -> Save data to $employees and clear the $Response variable to save memory -> Continue
-  - If BHR employee data extraction = Failed -> Send email alert, save error info to log file and terminate script
+- If BHR employee data extraction = successful -> Save data to $employees and clear the $Response variable to save memory -> Continue
+- If BHR employee data extraction = Failed -> Send email alert, save error info to log file and terminate script
 
 Connect to AzAd via graph module
 
-  - If connection successful -> Continue
-  - If connection failure -> Send alert + terminate script
+- If connection successful -> Continue
+- If connection failure -> Send alert + terminate script
