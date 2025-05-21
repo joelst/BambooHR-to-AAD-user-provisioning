@@ -23,13 +23,22 @@ This section will keep track of changes made over time.
 
 ### TODO
 
-- Clean up authentication required and move managed identity.
 - Create an Azure Automate template for easy deployment.
 - Fix any "AAD" variables and text now that it is Entra Id.
 
+### May 2025 changes
+
+- When an employee is offboarded the following is now completed.
+
+  - The user's owned Windows devices are Autopilot reset.
+  - The user is removed as owner of devices and a note is added.
+  - All of the meetings owned by the user a canceled.
+  - The mailbox has a out of office set.
+  - All owned groups are transferred to the user's former manager.
+
 ### February 2025 changes
 
-- Reconfiguredthe script to run in Azure Automation using variables for most configuration. Create the following variables:
+- Reconfigured the script to run in Azure Automation using variables for most configuration. Create the following variables:
   - BambooHrApiKey
   - BhrCompanyName
   - CompanyName
@@ -106,7 +115,7 @@ This is part of Bamboo HR and Entra Id (Azure Active Directory) integration proc
 
 - Mail.Send
 
-2. Set the following variables:
+1. Set the following variables:
 
 - BambooHRApiKey - API key created in BambooHR
 - AdminEmailAddress - Email address to receive email alerts
@@ -117,7 +126,7 @@ This is part of Bamboo HR and Entra Id (Azure Active Directory) integration proc
 
 1. Required modules: MGGraph 2.0, ExchangeOnlineManagement, PSTeams
 
-> **IMPORTANT:** This is a sample solution and should be used by those comfortable testing, retesting, and validating before **thinking** about using it in production. This content is provided *AS IS* with *no* guarantees or assumptions of quality, functionality, or support.
+> **IMPORTANT:** This is a sample solution and should be used by those comfortable testing, retesting, and validating before **thinking** about using it in production. This content is provided _AS IS_ with _no_ guarantees or assumptions of quality, functionality, or support.
 
 - You are responsible to comply with all applicable laws and regulations.
 - With great power comes great responsibility.
@@ -127,12 +136,13 @@ This is part of Bamboo HR and Entra Id (Azure Active Directory) integration proc
 The script will extract the employee data from BambooHR and for each user and will run one of the following processes:
 
 1. Attribute corrections - if the user has an existing account , and is an active employee, and, the last changed time in Azure AD differs from BambooHR, then this first block will compare each of the AzAD User object attributes with the data extracted from BHR and correct them if necessary.
-2. Name changed - If the user has an existing account, but the name does not match with the one from BHR, then, this block will run and correct the user Name, UPN,	emailAddress.
+2. Name changed - If the user has an existing account, but the name does not match with the one from BHR, then, this block will run and correct the user Name, UPN, emailAddress.
 3. New employee, and there is no Entra Id account, this script block will create a new user with the data extracted from BHR.
 
 Variables usage description:
 
 - Bamboo HR related variables:
+
   - $bhrDisplayName - The Display Name of the user in BambooHR
   - $bhrLastName - The Last name of the user in BambooHR
   - $bhrFirstName - The First Name of the user in BambooHR
@@ -147,6 +157,7 @@ Variables usage description:
   - $bhrStatus - The employee account status in BambooHR: Valid values are "Active" and "Inactive"
 
 - Entra Id (AAD) related variables:
+
   - $aadUPN_OBJdetails - All AzAD user object attributes extracted via WorkEmail
   - $aadEID_OBJdetails - All AzAD user object attributes extracted via EmployeeID
   - $aadWorkEmail - UserPrincipalName/EmailAddress of the AzureAD user account - string
@@ -161,11 +172,11 @@ Variables usage description:
   - $aadCompanyName - The company Name set on the AzureAD user account - string - Always will be "Tec Software Solutions"
   - $aadHireDate - The Hire Date set on the AzureAD user account - string
 
-## Major functions and logical operations that take place in the script:
+## Major functions and logical operations that take place in the script
 
 Initiate Script run time capture
 
-- Write-Log
+- Write-PSLog
 - New-Password
 
 Extract Employee Data from BHR
@@ -173,7 +184,7 @@ Extract Employee Data from BHR
 - If BHR employee data extraction = successful -> Save data to $employees and clear the $Response variable to save memory -> Continue
 - If BHR employee data extraction = Failed -> Send email alert, save error info to log file and terminate script
 
-Connect to AzAd via graph module
+Connect to Microsoft Graph via graph PowerShell module
 
 - If connection successful -> Continue
 - If connection failure -> Send alert + terminate script

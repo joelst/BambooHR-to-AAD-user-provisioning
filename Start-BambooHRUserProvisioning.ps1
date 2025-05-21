@@ -1,7 +1,10 @@
 #Requires -Module ExchangeOnlineManagement,PSTeams,Microsoft.Graph.Users,Microsoft.Graph.Authentication,Microsoft.Graph.Identity.DirectoryManagement, Microsoft.Graph.Identity.SignIns
+
 <#
 
-IMPORTANT: This is a sample solution and should be used by those comfortable testing and retesting and validating before using it in production.
+IMPORTANT: This is a sample solution and should be used by those comfortable testing and retesting and validating
+before using it in production.
+
 All content is provided AS IS with no guarantees or assumptions of quality or functionality.
 
 If you are using employee information there is much that can go wrong!
@@ -12,14 +15,19 @@ Friends don't let friends run untested scripts in production.
 Don't take any wooden nickels
 
 .SYNOPSIS
-Script to synchronize employee information from BambooHR to Azure Active Directory (Entra Id). It does not support on premises Active Directory.
+Script to synchronize employee information from BambooHR to Azure Active Directory (Entra Id).
+On premises Active Directory is not supported.
 
 .DESCRIPTION
 Extracts employee data from BambooHR and performs one of the following for each user extracted:
 
-	1. Attribute corrections - if the user has an existing account, is an active employee, and the last changed time in Azure AD differs from BambooHR, then this first block will compare each of the AAD User object attributes with the data extracted from BHR and correct them if necessary
-	2. Name change - If the user has an existing account, but the name does not match with the one from BHR, then, this block will run and correct the user Name, UPN,	emailaddress
-	3. New employee, and there is no account in AAD for him, this script block will create a new user with the data extracted from BHR
+	1. Attribute corrections - if the user has an existing account, is an active employee, and the last changed time
+    in Azure AD differs from BambooHR, then this first block will compare each of the AAD User object attributes
+    with the data extracted from BHR and correct them if necessary
+	2. Name change - If the user has an existing account, but the name does not match with the one from BHR, then,
+    this block will run and correct the user Name, UPN,	emailaddress
+	3. New employee, and there is no account in AAD for him, this script block will create a new user with the data
+    extracted from BHR
 
 .PARAMETER BambooHrApiKey
 Specifies the BambooHR API key as a string. It will be converted to the proper format.
@@ -50,7 +58,8 @@ Location to save logs
 
 .PARAMETER UsageLocation
 A two letter country code (ISO standard 3166) to set AAD usage location.
-Required for users that will be assigned licenses due to legal requirement to check for availability of services in countries. Examples include: US, JP, and GB.
+Required for users that will be assigned licenses due to legal requirement to check for availability of services
+ in countries. Examples include: US, JP, and GB.
 
 .PARAMETER DaysAhead
 Number of days to look ahead for the employee to start.
@@ -71,7 +80,8 @@ Specifies an additional email address to send any notification emails to.
 When specified shared mailbox permissions are updated
 
 .PARAMETER LicenseId
-When specified with a valid license id it will make sure there are still unassigned licenses before creating a new user.
+When specified with a valid license id it will make sure there are still unassigned licenses before creating
+ a new user.
 
 .NOTES
 More documentation available in project README
@@ -79,6 +89,8 @@ More documentation available in project README
 #>
 
 [CmdletBinding()]
+[System.Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidLongLines', '')]
+
 param (
   [Parameter()]
   [String]
@@ -250,7 +262,16 @@ function Get-LicenseStatus {
   )
 
   $licenses = Get-MgSubscribedSku -SubscribedSkuId $LicenseId |
-    Select-Object SkuPartNumber, SkuId, ConsumedUnits, @{Name = 'EnabledUnits'; Expression = { $_.PrepaidUnits.Enabled } }, @{Name = 'SuspendedUnits'; Expression = { $_.PrepaidUnits.Suspended } }, @{Name = 'WarningUnits'; Expression = { $_.PrepaidUnits.Warning } }
+    Select-Object SkuPartNumber, SkuId, ConsumedUnits, @{
+      Name       = 'EnabledUnits'
+      Expression = { $_.PrepaidUnits.Enabled }
+    }, @{
+      Name       = 'SuspendedUnits'
+      Expression = { $_.PrepaidUnits.Suspended }
+    }, @{
+      Name       = 'WarningUnits'
+      Expression = { $_.PrepaidUnits.Warning }
+    }
   $licensesConsumed = $licenses.ConsumedUnits
   $licensesEnabled = $licenses.EnabledUnits
   $licensesEnabled = $licensesEnabled
@@ -288,25 +309,7 @@ function Get-LicenseStatus {
   }
   elseif ($licensesAvailable -le 0) {
     Write-PSLog -Message "`n There are no licenses available!" -Severity Error
-    # $params = @{
-    #     Message         = @{
-    #         Subject      = "BhrAadSync: No licenses available"
-    #         Body         = @{
-    #             ContentType = "html"
-    #             Content     = "No licenses are available. <br/> There are $($licensesConsumed) of $($licensesEnabled) assigned. $EmailSignature"
-    #         }
-    #         ToRecipients = @(
-    #             @{
-    # 		                    EmailAddress = @{
-    #                     Address = $HelpDeskEmailAddress
-    #                 }
-    #             }
-    #         )
-    #     }
-    #     SaveToSentItems = "True"
-    # }
 
-    # Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress -Verbose
     New-AdaptiveCard {
       New-AdaptiveTextBlock -Text "There are $($licensesConsumed) of $($licensesEnabled) assigned!" -HorizontalAlignment Center -Weight Bolder -Size ExtraLarge
       New-AdaptiveTextBlock -Text 'The number of licenses should be increased' -Wrap -Weight Bolder -Size ExtraLarge
@@ -384,9 +387,44 @@ function Get-NewPassword {
   $chars += Get-Random -Count $SpecialChars -InputObject ($special)
   # Mix up the chars so that the special char aren't just at the end and then convert each char number
   # to the char and put in a string
-  $password = Get-Random -Count $PasswordLength -InputObject ($chars) | ForEach-Object -Begin { $aa = $null } -Process { $aa += [char]$_ } -End { $aa }
+  $password = Get-Random -Count $PasswordLength -InputObject ($chars) |
+    ForEach-Object -Begin { $aa = $null } -Process { $aa += [char]$_ } -End { $aa }
 
   return $password
+}
+
+function Get-MgGroupMemberRecursively {
+  <#
+        .SYNOPSIS
+        Get all members of a group recursively.
+        .DESCRIPTION
+        This function retrieves all members of a group recursively, including nested groups.
+        .PARAMETER GroupId
+        The ID of the group to retrieve members from.
+        .PARAMETER GroupDisplayName
+        The display name of the group to retrieve members from.
+        #>
+  [cmdletbinding()]
+
+  param([Parameter()][string]$GroupId,
+    [Parameter()][string]$GroupDisplayName
+  )
+  if ([string]::IsNullOrWhiteSpace($GroupId)) {
+    $GroupId = (Get-MgGroup -Filter "DisplayName eq '$GroupDisplayName'" -ErrorAction SilentlyContinue).Id
+  }
+
+  $output = @()
+  if ($GroupId) {
+    Get-MgGroupMember -GroupId $GroupId -All | ForEach-Object {
+      if ($_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user') {
+        $output += $_
+      }
+      if ($_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.group') {
+        $output += @(Get-MgGroupMemberRecursively -GroupId $_.Id)
+      }
+    }
+  }
+  return $output
 }
 
 function Sync-GroupMailboxDelegation {
@@ -435,42 +473,7 @@ function Sync-GroupMailboxDelegation {
     [string]
     $TenantId = $TenantId,
     [switch]$DoNotConnect
-
   )
-
-  function Get-MgGroupMemberRecursively {
-    <#
-        .SYNOPSIS
-        Get all members of a group recursively.
-        .DESCRIPTION
-        This function retrieves all members of a group recursively, including nested groups.
-        .PARAMETER GroupId
-        The ID of the group to retrieve members from.
-        .PARAMETER GroupDisplayName
-        The display name of the group to retrieve members from.
-        #>
-    [cmdletbinding()]
-
-    param([Parameter()][string]$GroupId,
-      [Parameter()][string]$GroupDisplayName
-    )
-    if ([string]::IsNullOrWhiteSpace($GroupId)) {
-      $GroupId = (Get-MgGroup -Filter "DisplayName eq '$GroupDisplayName'" -ErrorAction SilentlyContinue).Id
-    }
-
-    $output = @()
-    if ($GroupId) {
-      Get-MgGroupMember -GroupId $GroupId -All | ForEach-Object {
-        if ($_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.user') {
-          $output += $_
-        }
-        if ($_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.group') {
-          $output += @(Get-MgGroupMemberRecursively -GroupId $_.Id)
-        }
-      }
-    }
-    return $output
-  }
 
   if ($DoNotConnect.IsPresent -eq $false) {
     Connect-ExchangeOnline -ManagedIdentity -Organization $TenantId -ShowBanner:$false | Out-Null
@@ -1008,15 +1011,40 @@ $employees | Sort-Object -Property LastName |
                   Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -Department 'Not Active' -JobTitle 'Not Active' -OfficeLocation 'Not Active' -BusinessPhones '0' -MobilePhone '0' -CompanyName '$(Get-Date -UFormat %D)'" -Severity Debug
                   Update-MgUser -UserId $bhrWorkEmail -Department 'Not Active' -JobTitle 'Not Active' -OfficeLocation 'Not Active' -BusinessPhones '0' -MobilePhone '0' -CompanyName "$(Get-Date -UFormat %D)"
                   Get-MgUserMemberOf -UserId $bhrWorkEmail
-
                   # TODO: Does not work for on premises synced accounts. Not a problem with Entra Id (AAD) native.
                   $null = Update-MgUser -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrLastChanged } -UserId $bhrWorkEmail -ErrorAction SilentlyContinue | Out-Null
 
                   if (!$?) {
+                    #Write-PSLog -Message "Error changing ExtensionAttribute1. `nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nTrace: $($error.ScriptStackTrace)" -Severity Error
                     $error.Clear()
                   }
                   else {
                     Write-PSLog -Message "$bhrWorkEmail LastChanged attribute set from '$upnExtensionAttribute1' to '$bhrlastChanged'." -Severity Information
+                  }
+
+                  # Cancel all meetings for the user
+                  Write-PSLog -Message "Executing: Get-MgUserEvent -UserId $bhrWorkEmail | ForEach-Object { Remove-MgUserEvent -UserId $bhrWorkEmail -EventId $_.id }" -Severity Debug
+                  Get-MgUserEvent -UserId $bhrWorkEmail | ForEach-Object { Remove-MgUserEvent -UserId $bhrWorkEmail -EventId $_.id } | Out-Null
+
+                  # Set the out of office for the user that they are no longer with the company and to contact the manager
+                  $params = @{
+                    AutomaticRepliesSetting = @{
+                      Status               = 'AlwaysEnabled'
+                      ExternalAudience     = 'All'
+                      InternalReplyMessage = "I am no longer with the company. Please contact $($aadSupervisorEmail) for assistance."
+                      ExternalReplyMessage = "My role has changed, please contact $($aadSupervisorEmail) for assistance."
+                    }
+                  }
+
+                  # Determine if the user was an owner of any groups and assign ownership to the manager
+                  $groups = Get-MgUserMemberOf -UserId $bhrWorkEmail -ErrorAction SilentlyContinue
+                  if ($groups) {
+                    $groups | ForEach-Object {
+                      $group = $_
+                      if ($group.Owners -contains $bhrWorkEmail) {
+                        Write-PSLog -Message "User $bhrWorkEmail is an owner of group $($group.DisplayName). Reassigning ownership to $($aadSupervisorEmail)." -Severity Information
+                      }
+                    }
                   }
 
                   # Convert mailbox to shared
@@ -1037,17 +1065,21 @@ $employees | Sort-Object -Property LastName |
                   # Move OneDrive for Business content to archive location based on department
                   # TODO
 
-                  # Set Out of Office for user
-                  # TODO
-
-                  # Cancel Meetings
-                  # TODO
-
-                  # If user was a group owner, reassign ownership to someone else
-                  # TODO
-
                   # Reset/wipe the employees device(s)
-                  # TODO
+                  $uDevices = Get-MgUserOwnedDevice -UserId $bhrWorkEmail
+
+                  Write-Output "User's devices"
+                  $uDevices | Format-Table
+
+                  $uDevices | ForEach-Object {
+                    Invoke-MgDeviceManagementManagedDeviceWindowsAutopilotReset -ManagedDeviceId $_.Id
+                    Remove-MgDeviceRegisteredOwnerByRef -DeviceId $device.Id -DirectoryObjectId (Get-MgUser -UserId $bhrWorkEmail).Id
+                    $deviceDetails = Get-MgDevice -DeviceId $_.Id
+                    $existingNotes = $deviceDetails.Notes
+                    $timestamp = Get-Date -Format 'yyyy-MM-dd'
+                    $updatedNotes = "$existingNotes | Owner $userPrincipalName removed on $timestamp"
+                    Update-MgDevice -DeviceId $_.Id -Notes $updatedNotes
+                  }
 
                   # Remove Licenses
                   Write-PSLog -Message 'Removing licenses...' -Severity Debug
@@ -1069,19 +1101,11 @@ $employees | Sort-Object -Property LastName |
 
                   for ($i = 0 ; $i -lt $methods_count ; $i++) {
 
-                    if ((($methodsdata[$i]).Values) -like '*phoneAuthenticationMethod*') {
-                      Remove-MgUserAuthenticationPhoneMethod -UserId $bhrWorkEmail -PhoneAuthenticationMethodId ($methodID[$i]).id
-                      Write-PSLog -Message "Removed phone auth method for $bhrWorkEmail." -Severity Warning
-                    }
-                    if ((($methodsdata[$i]).Values) -like '*microsoftAuthenticatorAuthenticationMethod*') {
-                      Remove-MgUserAuthenticationMicrosoftAuthenticatorMethod -UserId $bhrWorkEmail -MicrosoftAuthenticatorAuthenticationMethodId ($methodID[$i]).id
-                      Write-PSLog -Message "Removed auth app method for $bhrWorkEmail." -Severity Warning
-                    }
-                    if ((($methodsdata[$i]).Values) -like '*windowsHelloForBusinessAuthenticationMethod*') {
-                      Remove-MgUserAuthenticationFido2Method -UserId $bhrWorkEmail -Fido2AuthenticationMethodId ($methodID[$i]).id
-                      Write-PSLog -Message "Removed PIN auth method for $bhrWorkEmail." -Severity Warning
-                    }
+                    if ((($methodsdata[$i]).Values) -like '*phoneAuthenticationMethod*') { Remove-MgUserAuthenticationPhoneMethod -UserId $bhrWorkEmail -PhoneAuthenticationMethodId ($methodID[$i]).id; Write-PSLog -Message "Removed phone auth method for $bhrWorkEmail." -Severity Warning }
+                    if ((($methodsdata[$i]).Values) -like '*microsoftAuthenticatorAuthenticationMethod*') { Remove-MgUserAuthenticationMicrosoftAuthenticatorMethod -UserId $bhrWorkEmail -MicrosoftAuthenticatorAuthenticationMethodId ($methodID[$i]).id; Write-PSLog -Message "Removed auth app method for $bhrWorkEmail." -Severity Warning }
+                    if ((($methodsdata[$i]).Values) -like '*windowsHelloForBusinessAuthenticationMethod*') { Remove-MgUserAuthenticationFido2Method -UserId $bhrWorkEmail -Fido2AuthenticationMethodId ($methodID[$i]).id ; Write-PSLog -Message "Removed PIN auth method for $bhrWorkEmail." -Severity Warning }
                   }
+
 
                   # Remove Manager
                   Write-PSLog -Message 'Removing Manager...' -Severity Debug
@@ -1341,7 +1365,6 @@ $employees | Sort-Object -Property LastName |
                 else {
                   Write-PSLog -Message "Hire date already correct $aadHireDate" -Severity Debug
                 }
-
 
                 # Check and set the work phone ignoring formatting
                 if (($aadWorkPhone) -ne ($bhrWorkPhone)) {
