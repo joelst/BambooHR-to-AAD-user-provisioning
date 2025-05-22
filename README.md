@@ -23,7 +23,7 @@ This section will keep track of changes made over time.
 
 ### TODO
 
-- Create an Azure Automate template for easy deployment.
+- Create an Azure ARM template for easy deployment.
 - Fix any "AAD" variables and text now that it is Entra Id.
 
 ### May 2025 changes
