@@ -33,7 +33,7 @@ This section will keep track of changes made over time.
   - The user's owned Windows devices are Autopilot reset.
   - The user is removed as owner of devices and a note is added.
   - All of the meetings owned by the user a canceled.
-  - The mailbox has a out of office set.
+  - The mailbox has an out of office set.
   - All owned groups are transferred to the user's former manager.
 
 ### February 2025 changes
