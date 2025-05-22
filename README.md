@@ -39,11 +39,13 @@ This section will keep track of changes made over time.
 ### February 2025 changes
 
 - Reconfigured the script to run in Azure Automation using variables for most configuration. Create the following variables:
+
   - BambooHrApiKey
   - BhrCompanyName
   - CompanyName
   - TeamsCardUri
   - TenantId
+
 - Removed certificate and application registrations authentication and added using a system managed identity.
 - Review [Add-ManagedIdentityPermissions.ps1](./Add-ManagedIdentityPermissions.ps1) to get started assigning the Automation account appropriate permissions.
 
