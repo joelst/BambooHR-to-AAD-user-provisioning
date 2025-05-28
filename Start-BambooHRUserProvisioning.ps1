@@ -1005,13 +1005,14 @@ $employees | Sort-Object -Property LastName |
                 }
                 else {
 
-                  Write-PSLog -Message "User $bhrWorkEmail is no longer active in BambooHR, disabling Entra Id (AAD) account." -Severity Information
+                  Write-PSLog -Message "User $bhrWorkEmail is no longer active in BambooHR, disabling Entra Id account." -Severity Information
                   Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params" -Severity Debug
                   Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params
                   Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -Department 'Not Active' -JobTitle 'Not Active' -OfficeLocation 'Not Active' -BusinessPhones '0' -MobilePhone '0' -CompanyName '$(Get-Date -UFormat %D)'" -Severity Debug
                   Update-MgUser -UserId $bhrWorkEmail -Department 'Not Active' -JobTitle 'Not Active' -OfficeLocation 'Not Active' -BusinessPhones '0' -MobilePhone '0' -CompanyName "$(Get-Date -UFormat %D)"
                   Get-MgUserMemberOf -UserId $bhrWorkEmail
-                  # TODO: Does not work for on premises synced accounts. Not a problem with Entra Id (AAD) native.
+
+                  # TODO: Does not work for on premises synced accounts. Not a problem with Entra Id native.
                   $null = Update-MgUser -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrLastChanged } -UserId $bhrWorkEmail -ErrorAction SilentlyContinue | Out-Null
 
                   if (!$?) {
@@ -1023,6 +1024,7 @@ $employees | Sort-Object -Property LastName |
                   }
 
                   # Cancel all meetings for the user
+                  Write-PSLog -Message "Canceling meetings for $bhrWorkEmail" -Severity Information
                   Write-PSLog -Message "Executing: Get-MgUserEvent -UserId $bhrWorkEmail | ForEach-Object { Remove-MgUserEvent -UserId $bhrWorkEmail -EventId $_.id }" -Severity Debug
                   Get-MgUserEvent -UserId $bhrWorkEmail | ForEach-Object { Remove-MgUserEvent -UserId $bhrWorkEmail -EventId $_.id } | Out-Null
 
@@ -1036,7 +1038,13 @@ $employees | Sort-Object -Property LastName |
                     }
                   }
 
+                  # set the automatic replies for the user
+                  Write-PSLog -Message "Setting automatic replies for $bhrWorkEmail" -Severity Information
+                  Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -AutomaticRepliesSetting $params" -Severity Debug
+                  Update-MgUser -UserId $bhrWorkEmail -AutomaticRepliesSetting $params
+
                   # Determine if the user was an owner of any groups and assign ownership to the manager
+                  Write-PSLog -Message "Checking to see if there are groups owned by $bhrWorkEmail" -Severity Information
                   $groups = Get-MgUserMemberOf -UserId $bhrWorkEmail -ErrorAction SilentlyContinue
                   if ($groups) {
                     $groups | ForEach-Object {
@@ -1055,6 +1063,7 @@ $employees | Sort-Object -Property LastName |
                   Set-Mailbox -Identity $bhrWorkEmail -Type Shared
                   # Wait for mailbox to be converted
                   Start-Sleep 60
+
                   # Give permissions to converted mailbox to previous manager
                   $mObj = Get-EXOMailbox -Anr $bhrWorkEmail
                   Write-PSLog "`t$($aadSupervisorEmail) being given permissions to $bhrWorkEmail now..." -Severity Information
@@ -1066,14 +1075,17 @@ $employees | Sort-Object -Property LastName |
                   # TODO
 
                   # Reset/wipe the employees device(s)
+                  Write-PSLog -Message "Removing devices for $bhrWorkEmail..." -Severity Information
                   $uDevices = Get-MgUserOwnedDevice -UserId $bhrWorkEmail
 
                   Write-Output "User's devices"
                   $uDevices | Format-Table
 
                   $uDevices | ForEach-Object {
-                    Invoke-MgDeviceManagementManagedDeviceWindowsAutopilotReset -ManagedDeviceId $_.Id
+                    Write-PSLog -Message "Removing $bhrWorkEmail from $($device.Id) $($device.DisplayName)..." -Severity Debug
+                    # Invoke-MgDeviceManagementManagedDeviceWindowsAutopilotReset -ManagedDeviceId $_.Id
                     Remove-MgDeviceRegisteredOwnerByRef -DeviceId $device.Id -DirectoryObjectId (Get-MgUser -UserId $bhrWorkEmail).Id
+
                     $deviceDetails = Get-MgDevice -DeviceId $_.Id
                     $existingNotes = $deviceDetails.Notes
                     $timestamp = Get-Date -Format 'yyyy-MM-dd'
@@ -1082,7 +1094,7 @@ $employees | Sort-Object -Property LastName |
                   }
 
                   # Remove Licenses
-                  Write-PSLog -Message 'Removing licenses...' -Severity Debug
+                  Write-PSLog -Message 'Removing licenses...' -Severity Information
 
                   Write-PSLog -Message "Executing: Get-MgUserLicenseDetail -UserId $bhrWorkEmail | ForEach-Object { Set-MgUserLicense -UserId $bhrWorkEmail -RemoveLicenses $_.SkuId -AddLicenses @{} }" -Severity Debug
                   Get-MgUserLicenseDetail -UserId $bhrWorkEmail | ForEach-Object { Set-MgUserLicense -UserId $bhrWorkEmail -RemoveLicenses $_.SkuId -AddLicenses @{} }
@@ -1106,7 +1118,6 @@ $employees | Sort-Object -Property LastName |
                     if ((($methodsdata[$i]).Values) -like '*windowsHelloForBusinessAuthenticationMethod*') { Remove-MgUserAuthenticationFido2Method -UserId $bhrWorkEmail -Fido2AuthenticationMethodId ($methodID[$i]).id ; Write-PSLog -Message "Removed PIN auth method for $bhrWorkEmail." -Severity Warning }
                   }
 
-
                   # Remove Manager
                   Write-PSLog -Message 'Removing Manager...' -Severity Debug
                   Write-PSLog -Message "Executing: Remove-MgUserManagerByRef -UserId $bhrWorkEmail" -Severity Debug
@@ -1114,7 +1125,7 @@ $employees | Sort-Object -Property LastName |
 
                   Write-PSLog -Message "Executing: Update-MgUser -EmployeeId 'LVR' -UserId $bhrWorkEmail" -Severity Debug
                   Update-MgUser -EmployeeId 'LVR' -UserId $bhrWorkEmail
-                  Write-PSLog -Message 'Updating shared mailbox settings...'
+                  Write-PSLog -Message 'Updating shared mailbox settings...' -Severity Information
 
                   if ($error.Count -ne 0) {
                     $error | ForEach-Object {
