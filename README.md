@@ -1,21 +1,19 @@
-# BambooHR to Entra Id (Azure AD) user provisioning
+# BambooHR to Entra ID User Provisioning
 
-User provisioning from BambooHR to Entra Id formerly known as Azure Active Directory (AAD).
+User provisioning from BambooHR to Microsoft Entra ID (formerly Azure Active Directory).
 
 ## Introduction
 
-This is a fork of the AMAZING work done by [PaulTony BHR-to-AzAd-user-Provisioning](https://github.com/PaulTony-coocoo/BHR-to-AzAD-user-provisioning). Their work saved me many hours having to put together this myself and I'm very grateful!
-
-Anyone is free to take what is here and I will happily contribute my changes back to the original author, if they find my ideas worthy.
+This is a fork of the AMAZING work done by [PaulTony BHR-to-AzAd-user-Provisioning](https://github.com/PaulTony-coocoo/BHR-to-AzAD-user-provisioning). Their work saved me many hours trying to put together this myself and I'm very grateful!
 
 What is different about this from the original?
 
-1. It is focused on one project but trying to anticipate other scenarios. Primarily the changes are to make this work for this project.
-2. Moving to use the [Microsoft Graph 2.x PowerShell modules](https://devblogs.microsoft.com/microsoft365dev/microsoft-graph-powershell-v2-is-now-in-public-preview-half-the-size-and-will-speed-up-your-automations/). There are some differences that forced changes.
-3. Make it run using Azure Automation or as an Azure Function. So I'm adding parameters to allow for easy customization without modifying the code, making it easier to execute it in Azure Automation or an Azure Function.
-4. My project is for a cloud-first Entra Id (AAD) organization that but has on some hybrid user objects. This has lead to issues with some attributes not being writable.
+1. It is focused to work for one of my projects with an attempt to make it work for other scenarios. Primarily the changes are to make this work for this project.
+2. Use the [Microsoft Graph 2.x PowerShell modules](https://devblogs.microsoft.com/microsoft365dev/microsoft-graph-powershell-v2-is-now-in-public-preview-half-the-size-and-will-speed-up-your-automations/). There are some differences that forced changes.
+3. Make it run as an Azure Automation runbook or as an Azure Function. Added parameters to allow for easy customization without modifying the code, making it easier to execute it in Azure Automation or an Azure Function.
+4. My project is for a cloud-first Entra ID organization that but may also work with some hybrid user objects.
 5. I've got a _little OCD_ when it comes to silly things like variable names. Although I _really_ tried to fight my irrational desire to change them, I failed. No, there wasn't anything wrong with the original ones, just try explaining that to my OCD.
-6. If you happen to use the script, please star the repo.
+6. If you use this, please star the repo or reach out to me.
 
 ## Changes & Updates
 
@@ -24,15 +22,26 @@ This section will keep track of changes made over time.
 ### TODO
 
 - Create an Azure ARM template for easy deployment.
-- Fix any "AAD" variables and text now that it is Entra Id.
+- Continue modernizing variable names from AAD to Entra ID throughout codebase.
+
+### October 2025 changes
+
+- Converted custom `-TestOnly` switch to PowerShell's standard `-WhatIf` parameter using `SupportsShouldProcess` pattern for better compliance with PowerShell standards.
+- Set `ConfirmImpact = 'None'` to prevent script hanging in unattended Azure Automation environments while preserving `-WhatIf` functionality.
+- Added connection state tracking to prevent redundant connections to Azure services.
+- Created `Connect-ExchangeOnlineIfNeeded` helper function to optimize Exchange connections.
+- Restructured Teams adaptive card logic to always send summary notifications regardless of execution mode (production, WhatIf, or no changes).
+- Fixed blank duration display in completion logs by properly calculating script execution time.
+- Added automatic loading of email addresses (`AdminEmailAddress`, `NotificationEmailAddress`, `HelpDeskEmailAddress`, `LicenseId`) from Azure Automation variables with fallback to generated defaults.
+- Added many comments and notes both in the script and a separate developer guide to help understand and customize this solution.
 
 ### May 2025 changes
 
-- When an employee is offboarded the following is now completed.
+- When an employee is offboarded, the following tasks are now completed.
 
   - The user's owned Windows devices are Autopilot reset.
   - The user is removed as owner of devices and a note is added.
-  - All of the meetings owned by the user a canceled.
+  - All of the meetings owned by the user are canceled.
   - The mailbox has an out of office set.
   - All owned groups are transferred to the user's former manager.
 
@@ -83,13 +92,13 @@ This section will keep track of changes made over time.
 - The API key from BambooHR is automatically formatted, you can simply provide the key as-is from BambooHR
 - Microsoft Graph 2.0-preview8 PowerShell module tested.
 - Removed the line numbers from the log messages, because I messed up the line numbers. The stack trace should provide enough info.
-- Added `-TestOnly` parameter as a pseudo `-Whatif` parameter. It will log what would have been executed but will not make any changes.
+- Added `-TestOnly` parameter as a pseudo `-WhatIf` parameter. It will log what would have been executed but will not make any changes. *(Note: This has been replaced with standard PowerShell `-WhatIf` in October 2025)*
 - Changed the Bamboo report to pull future employees, as this was required for my project. Added the `-CurrentOnly` parameter if you would rather only process current employees.
 - Moved most screen output to Verbose channel. If you are troubleshooting, run with -Verbose to see details.
 - Fixed a bug in logging where the wrong time was being logged. You can see the fix in the incorrectly named [Original_BambooHr_User_Provisioning.ps1](./Original_BambooHR_User_Provisioning.ps1) as it has a couple small changes from the [upstream version](https://github.com/PaulTony-coocoo/BHR-to-AzAD-user-provisioning/blob/main/GENERALIZED_AUTO_USER_PROVISIONING.ps1).
 - Added NotificationEmailAddress to copy all messages to so that HR or IT can keep an eye what changed process. This will give them the information needed to track down when a user's information changed.
 - Added Sync-GroupMailboxDelegation function to set shared mailbox permissions.
-- Added Photo Sync, when a new user is created it will attempt to add the photo from Bamboo to AAD. This is not kept in sync afterward, just on initial creation.
+- Added Photo Sync, when a new user is created it will attempt to add the photo from BambooHR to Entra ID. This is not kept in sync afterward, just on initial creation.
 - Added Teams Adaptive Card logging. This is very simple and ugly now, but moved from sending an email to the webhook. This should get better in the future.
 
 ## Known issues
@@ -98,6 +107,23 @@ This section will keep track of changes made over time.
 - User off boarding process may have a couple issues that needs to be retested.
 - There are a number of areas where the process can be streamlined and _may be_ addressed in the future.
 - Entra Id accounts are disabled and not deleted. You will need to either add logic to automatically delete accounts or do this manually.
+
+## Testing and Validation
+
+**IMPORTANT**: Always test thoroughly before production use:
+
+1. **Preview Mode**: Run with `-WhatIf` parameter to preview changes without applying them:
+   ```powershell
+   .\Start-BambooHRUserProvisioning.ps1 -WhatIf
+   ```
+
+2. **Validate Configuration**: Ensure all Azure Automation variables are properly configured.
+
+3. **Test with Subset**: Start with a small group of users before full deployment.
+
+4. **Monitor Logs**: Review both PowerShell output and Teams notifications for any issues.
+
+5. **Azure Automation**: The script is optimized for unattended execution in Azure Automation runbooks with proper error handling and connection state management.
 
 ## Future ideas
 
@@ -111,35 +137,40 @@ If you have suggestions or questions, feel free to reach out.
 
 ## Getting started
 
-This is part of Bamboo HR and Entra Id (Azure Active Directory) integration process. This will make sure employees have Entra Id accounts. This does not create or update on premises Active Directory Domain Services accounts.
+This is part of BambooHR and Entra ID integration process. This will ensure employees have Entra ID accounts. This does not create or update on-premises Active Directory Domain Services accounts.
 
-1. Create Azure AD Enterprise application for unattended auth using a certificate for Azure AD object management and Exchange Online management
+### Prerequisites
 
-- Mail.Send
+1. **Entra ID Application Registration**: Create an Entra ID Enterprise application with managed identity for unattended authentication
+   - Required Graph API permissions: `User.ReadWrite.All`, `Directory.ReadWrite.All`, `Mail.Send`
+   - Review [Add-ManagedIdentityPermissions.ps1](./Add-ManagedIdentityPermissions.ps1) for permission setup
 
-1. Set the following variables:
+2. **Azure Automation Variables**: Configure the following variables in your Azure Automation account:
 
-- BambooHRApiKey - API key created in BambooHR
-- AdminEmailAddress - Email address to receive email alerts
-- CompanyName - Company name used for the URL to access BambooHR
-- TenantID - Microsoft Tenant Id
-- AADCertificateThumbPrint - Certificate thumbprint created for the application in AAD
-- AzAppClientID - Application created for Application.
+- **BambooHrApiKey** - API key created in BambooHR (secure string)
+- **BHRCompanyName** - Company name used for the URL to access BambooHR  
+- **CompanyName** - Your company display name
+- **TenantId** - Microsoft Tenant ID
+- **TeamsCardUri** - (Optional) Teams webhook URL for notifications
+- **AdminEmailAddress** - (Optional) Administrator email for notifications (falls back to generated default)
+- **NotificationEmailAddress** - (Optional) HR notification email address (falls back to generated default)
+- **HelpDeskEmailAddress** - (Optional) Help desk email for user support (falls back to generated default)
 
-1. Required modules: MGGraph 2.0, ExchangeOnlineManagement, PSTeams
+2. Required modules: Microsoft Graph 2.x, ExchangeOnlineManagement, PSTeams
 
-> **IMPORTANT:** This is a sample solution and should be used by those comfortable testing, retesting, and validating before **thinking** about using it in production. This content is provided _AS IS_ with _no_ guarantees or assumptions of quality, functionality, or support.
+3. **Test thoroughly**: Always run with `-WhatIf` parameter first to preview changes before applying them.
+
+> **IMPORTANT:** This is a sample solution and should be used by those comfortable testing, retesting, and validating before **even considering** using it in production. This content is provided _AS IS_ with _no_ guarantees or assumptions of quality, functionality, or support.
 
 - You are responsible to comply with all applicable laws and regulations.
 - With great power comes great responsibility.
 - Friends don't let friends run untested directory scripts in production.
-- Don't take any wooden nickels.
 
-The script will extract the employee data from BambooHR and for each user and will run one of the following processes:
+The script will extract employee data from BambooHR and for each user will execute one of the following processes:
 
-1. Attribute corrections - if the user has an existing account , and is an active employee, and, the last changed time in Azure AD differs from BambooHR, then this first block will compare each of the AzAD User object attributes with the data extracted from BHR and correct them if necessary.
-2. Name changed - If the user has an existing account, but the name does not match with the one from BHR, then, this block will run and correct the user Name, UPN, emailAddress.
-3. New employee, and there is no Entra Id account, this script block will create a new user with the data extracted from BHR.
+1. **Attribute corrections** - If the user has an existing account, is an active employee, and the last changed time in Entra ID differs from BambooHR, this process will compare each Entra ID user object attribute with the data from BambooHR and correct them if necessary.
+2. **Name change** - If the user has an existing account but the name does not match BambooHR, this process will correct the user's Name, UPN, and email address.
+3. **New employee** - If there is no Entra ID account for the employee, this process will create a new user with the data extracted from BambooHR.
 
 Variables usage description:
 
@@ -158,35 +189,43 @@ Variables usage description:
   - $bhrEmploymentStatus - The current status of the employee: Active, Terminated and if contains "Suspended" is in "maternity leave"
   - $bhrStatus - The employee account status in BambooHR: Valid values are "Active" and "Inactive"
 
-- Entra Id (AAD) related variables:
+- Entra Id related variables:
 
-  - $aadUPN_OBJdetails - All AzAD user object attributes extracted via WorkEmail
-  - $aadEID_OBJdetails - All AzAD user object attributes extracted via EmployeeID
-  - $aadWorkEmail - UserPrincipalName/EmailAddress of the AzureAD user account - string
-  - $aadJobTitle - Job Title of the AzureAd user account - string
-  - $aadDepartment - Department of the AzureAD user account - string
-  - $aadStatus - Login ability status of the AzureAD user account - boolean -can be True(Account is Active) or False(Account is Disabled)
-  - $aadEmployeeNumber - Employee Number set on AzureAD user account(assigned by HR upon hire) - string
-  - $aadSupervisorEmail - Direct Manager Name set on the AzureAD user account
-  - $aadDisplayName - The Display Name set on the AzureAD user account - string
-  - $aadFirstName - The First Name set on the AzureAD user account - string
-  - $aadLastName - The Last Name set on the AzureAD user account - string
-  - $aadCompanyName - The company Name set on the AzureAD user account - string - Always will be "Tec Software Solutions"
-  - $aadHireDate - The Hire Date set on the AzureAD user account - string
+  - $entraIdUpnObjDetails - All Entra Id user object attributes extracted via WorkEmail lookup
+  - $entraIdEidObjDetails - All Entra Id user object attributes extracted via EmployeeID lookup
+  - $entraIdWorkEmail - UserPrincipalName/EmailAddress of the Entra Id user account - string
+  - $entraIdJobTitle - Job Title of the Entra Id user account - string
+  - $entraIdDepartment - Department of the Entra Id user account - string
+  - $entraIdStatus - Login ability status of the Entra Id user account - boolean -can be True(Account is Active) or False(Account is Disabled)
+  - $entraIdEmployeeNumber - Employee Number set on Entra Id user account(assigned by HR upon hire) - string
+  - $entraIdSupervisorEmail - Direct Manager email address set on the Entra Id user account
+  - $entraIdDisplayName - The Display Name set on the Entra Id user account - string
+  - $entraIdFirstName - The Given Name set on the Entra Id user account - string
+  - $entraIdLastName - The Surname set on the Entra Id user account - string
+  - $entraIdCompanyName - The Company Name set on the Entra Id user account - string
+  - $entraIdHireDate - The Employee Hire Date set on the Entra Id user account - string
+  - $entraIdOfficeLocation - The Office Location set on the Entra Id user account - string
+  - $entraIdWorkPhone - The Business Phone number set on the Entra Id user account - string
+  - $entraIdMobilePhone - The Mobile Phone number set on the Entra Id user account - string
 
-## Major functions and logical operations that take place in the script
+## Script Architecture
 
-Initiate Script run time capture
+### Key Functions and Operations
 
-- Write-PSLog
-- New-Password
+**Runtime Initialization:**
+- `Write-PSLog` - Enhanced logging with correlation tracking
+- `Get-NewPassword` - Secure password generation
+- `Initialize-PerformanceCache` - Caching for improved performance
 
-Extract Employee Data from BHR
+**Data Extraction:**
+- **Success**: Save employee data to `$employees` variable, clear `$response` to save memory, continue processing
+- **Failure**: Send email alert, log error information, and terminate script
 
-- If BHR employee data extraction = successful -> Save data to $employees and clear the $Response variable to save memory -> Continue
-- If BHR employee data extraction = Failed -> Send email alert, save error info to log file and terminate script
+**Microsoft Graph Connection:**
+- **Success**: Continue with user processing
+- **Failure**: Send alert and terminate script
 
-Connect to Microsoft Graph via graph PowerShell module
-
-- If connection successful -> Continue
-- If connection failure -> Send alert + terminate script
+**User Processing:**
+- Sequential processing of each employee with comprehensive error handling
+- Retry logic for failed operations
+- Teams notifications for status updates
