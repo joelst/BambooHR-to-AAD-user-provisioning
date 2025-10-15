@@ -2030,9 +2030,23 @@ Where-Object { $_.workEmail -like "*$($Script:Config.Email.CompanyEmailDomain)" 
             }
 
             # Cancel all meetings for the user
-            Write-PSLog -Message "Canceling meetings for $bhrWorkEmail" -Severity Information
-            Write-PSLog -Message "Executing: Get-MgUserEvent -UserId $bhrWorkEmail | ForEach-Object { Remove-MgUserEvent -UserId $bhrWorkEmail -EventId $_.id }" -Severity Debug
-            Get-MgUserEvent -UserId $bhrWorkEmail | ForEach-Object { Remove-MgUserEvent -UserId $bhrWorkEmail -EventId $_.id } | Out-Null
+            Write-PSLog -Message "Attempting to cancel meetings for $bhrWorkEmail" -Severity Information
+            try {
+              Write-PSLog -Message "Executing: Get-MgUserEvent -UserId $bhrWorkEmail | ForEach-Object { Remove-MgUserEvent -UserId $bhrWorkEmail -EventId `$_.id }" -Severity Debug
+              $userEvents = Get-MgUserEvent -UserId $bhrWorkEmail -ErrorAction Stop
+              if ($userEvents) {
+                $userEvents | ForEach-Object { 
+                  Remove-MgUserEvent -UserId $bhrWorkEmail -EventId $_.id -ErrorAction SilentlyContinue 
+                } | Out-Null
+                Write-PSLog -Message "Successfully canceled meetings for $bhrWorkEmail" -Severity Information
+              } else {
+                Write-PSLog -Message "No meetings found for $bhrWorkEmail" -Severity Debug
+              }
+            }
+            catch {
+              Write-PSLog -Message "Unable to cancel meetings for $bhrWorkEmail. This requires Calendars.ReadWrite permission. Error: $($_.Exception.Message)" -Severity Warning
+              $errorSummary.Warnings += "Calendar access denied for $bhrWorkEmail - missing Calendars.ReadWrite permission"
+            }
 
             # Set the out of office for the user that they are no longer with the company and to contact the manager
             Connect-ExchangeOnlineIfNeeded -TenantId $Script:Config.Azure.TenantId
