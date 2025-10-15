@@ -2035,20 +2035,21 @@ Where-Object { $_.workEmail -like "*$($Script:Config.Email.CompanyEmailDomain)" 
             Get-MgUserEvent -UserId $bhrWorkEmail | ForEach-Object { Remove-MgUserEvent -UserId $bhrWorkEmail -EventId $_.id } | Out-Null
 
             # Set the out of office for the user that they are no longer with the company and to contact the manager
-            $params = @{
-              AutomaticRepliesSetting = @{
-                Status               = 'AlwaysEnabled'
-                ExternalAudience     = 'All'
-                InternalReplyMessage = "I am no longer with the company. Please contact $($entraIdSupervisorEmail) for assistance."
-                ExternalReplyMessage = "My role has changed, please contact $($entraIdSupervisorEmail) for assistance."
-              }
-            }
+            Connect-ExchangeOnlineIfNeeded -TenantId $Script:Config.Azure.TenantId
+            
+            $internalMessage = "I am no longer with the company. Please contact $($entraIdSupervisorEmail) for assistance."
+            $externalMessage = "My role has changed, please contact $($entraIdSupervisorEmail) for assistance."
 
             # set the automatic replies for the user
             Write-PSLog -Message "Setting automatic replies for $bhrWorkEmail" -Severity Information
-            Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -AutomaticRepliesSetting $params" -Severity Debug
+            Write-PSLog -Message "Executing: Set-MailboxAutoReplyConfiguration -Identity $bhrWorkEmail -AutoReplyState Enabled -ExternalAudience All" -Severity Debug
             Invoke-WithRetry -Operation "Set automatic replies for: $bhrWorkEmail" -ScriptBlock {
-              Update-MgUser -UserId $bhrWorkEmail -AutomaticRepliesSetting $params
+              Set-MailboxAutoReplyConfiguration -Identity $bhrWorkEmail `
+                -AutoReplyState Enabled `
+                -ExternalAudience All `
+                -InternalMessage $internalMessage `
+                -ExternalMessage $externalMessage `
+                -ErrorAction Stop
             }
 
             # Determine if the user was an owner of any groups and assign ownership to the manager
@@ -2941,7 +2942,7 @@ Where-Object { $_.workEmail -like "*$($Script:Config.Email.CompanyEmailDomain)" 
                 Subject       = "Welcome, $bhrFirstName!"
                 Body          = @{
                   ContentType = 'html'
-                  Content     = "<br/><br/><p>Welcome to Gecko Green, $bhrFirstName!</p><br/>`
+                  Content     = "<br/><br/><p>Welcome to $CompanyName, $bhrFirstName!</p><br/>`
                               <p> $WelcomeUserText</p><br/>`
                               <p> Your manager will provide more details about working with your team.</p>`
                               <p>Additionally, below you will find some helpful links to get you started.</p>`
@@ -3108,18 +3109,32 @@ if ((-not $WhatIfPreference) -and ([string]::IsNullOrWhiteSpace($Script:logConte
   if (-not [string]::IsNullOrWhiteSpace($Script:Config.Features.TeamsCardUri)) {
     Write-PSLog 'Teams notification needs to be sent and a URL exists' -Severity Debug
     try {
+      # Extract summary from log content
+      $changesSummary = @()
+      if ($Script:logContent -match 'Created new user') { $changesSummary += "✓ New users created" }
+      if ($Script:logContent -match 'Updated user') { $changesSummary += "✓ User attributes updated" }
+      if ($Script:logContent -match 'Disabled user|Terminating user') { $changesSummary += "✓ Users terminated/disabled" }
+      if ($Script:logContent -match 'Name change') { $changesSummary += "✓ Name changes processed" }
+      if ($Script:logContent -match 'mailbox') { $changesSummary += "✓ Mailbox changes applied" }
+      
       New-AdaptiveCard {
         New-AdaptiveTextBlock -Text 'BambooHR to AAD Sync - Changes Applied' -Wrap -Weight Bolder -Color Good
         New-AdaptiveTextBlock -Text "Users Processed: $processedUserCount" -Wrap
+        New-AdaptiveTextBlock -Text "Duration: $([math]::Round((New-TimeSpan -Start $Script:StartTime -End (Get-Date)).TotalMinutes, 2)) minutes" -Wrap
         if ($errorSummary.TotalErrors -gt 0) {
           New-AdaptiveTextBlock -Text "Errors: $($errorSummary.TotalErrors)" -Wrap -Color Warning
+        } else {
+          New-AdaptiveTextBlock -Text "No errors" -Wrap -Color Good
         }
-        New-AdaptiveTextBlock -Text "Duration: $([math]::Round((New-TimeSpan -Start $Script:StartTime -End (Get-Date)).TotalMinutes, 2)) minutes" -Wrap
-        New-AdaptiveTextBlock -Text "Changes:" -Wrap -Weight Bolder
-        $Script:logContent | ForEach-Object { 
-          $atb = $_.Replace('<p>', '').Replace('</p>', '').Replace('<br/>', '').Replace('<br>', '')
-          New-AdaptiveTextBlock -Text $atb -Wrap 
+        if ($changesSummary.Count -gt 0) {
+          New-AdaptiveTextBlock -Text "`nChanges Applied:" -Wrap -Weight Bolder
+          $changesSummary | ForEach-Object {
+            New-AdaptiveTextBlock -Text $_ -Wrap
+          }
+        } else {
+          New-AdaptiveTextBlock -Text "`nNo significant changes detected" -Wrap
         }
+        New-AdaptiveTextBlock -Text "`nCompleted: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -Wrap -Size Small
       } -Uri $Script:Config.Features.TeamsCardUri -Speak 'BambooHR to AAD sync completed with changes applied'
       Write-PSLog 'Teams notification sent: Changes applied' -Severity Debug
     }
@@ -3173,14 +3188,26 @@ else {
         Write-PSLog 'Teams notification sent: No changes made' -Severity Information
       }
       else {
-        # Changes were made - include log content
+        # Extract summary from log content
+        $changesSummary = @()
+        if ($Script:logContent -match 'Created new user') { $changesSummary += "✓ New users created" }
+        if ($Script:logContent -match 'Updated user') { $changesSummary += "✓ User attributes updated" }
+        if ($Script:logContent -match 'Disabled user|Terminating user') { $changesSummary += "✓ Users terminated/disabled" }
+        if ($Script:logContent -match 'Name change') { $changesSummary += "✓ Name changes processed" }
+        if ($Script:logContent -match 'mailbox') { $changesSummary += "✓ Mailbox changes applied" }
+        
         New-AdaptiveCard {
           New-AdaptiveTextBlock -Text 'BambooHR to AAD Sync Completed' -Wrap -Weight Bolder
           New-AdaptiveTextBlock -Text "Duration: $([math]::Round((New-TimeSpan -Start $Script:StartTime -End (Get-Date)).TotalMinutes, 2)) minutes" -Wrap
-          $Script:logContent | ForEach-Object {
-            $atb = $_.Replace('<p>', '').Replace('</p>', '').Replace('<br/>', '').Replace('<br>', '')
-            New-AdaptiveTextBlock -Text $atb -Wrap
+          if ($changesSummary.Count -gt 0) {
+            New-AdaptiveTextBlock -Text "`nChanges Detected:" -Wrap -Weight Bolder
+            $changesSummary | ForEach-Object {
+              New-AdaptiveTextBlock -Text $_ -Wrap
+            }
+          } else {
+            New-AdaptiveTextBlock -Text "`nNo significant changes detected" -Wrap
           }
+          New-AdaptiveTextBlock -Text "`nCompleted: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -Wrap -Size Small
         } -Uri $Script:Config.Features.TeamsCardUri -Speak 'BambooHR to AAD sync completed successfully'
         Write-PSLog 'Teams notification sent: Sync summary with changes' -Severity Information
       }
