@@ -1140,6 +1140,9 @@ function Get-LicenseStatus {
     }
 
     $licensesAvailable = $licensesEnabled - $licensesConsumed
+    
+    # Add AvailableUnits to the return object
+    $licenses | Add-Member -MemberType NoteProperty -Name 'AvailableUnits' -Value $licensesAvailable -Force
 
     if ($licensesAvailable -lt 0 -and $NewUser.IsPresent) {
       Write-PSLog "There are no licenses available for a newly created user!" -Severity Error
@@ -2766,7 +2769,7 @@ Where-Object { $_.workEmail -like "*$($Script:Config.Email.CompanyEmailDomain)" 
     }
 
     # Create new employee account
-    if ($entraIdUpnObjDetails.Capacity -eq 0 -and $entraIdEidObjDetails.Capacity -eq 0 -and ($bhrAccountEnabled -eq $true)) {
+    if ((-not $entraIdUpnObjDetails) -and (-not $entraIdEidObjDetails) -and ($bhrAccountEnabled -eq $true)) {
       Write-PSLog -Message "No AAD account exist but employee in bhr is $bhrAccountEnabled" -Severity Debug
 
       if ([string]::IsNullOrWhiteSpace($Script:Config.Azure.LicenseId) -eq $false) {
@@ -3097,9 +3100,14 @@ In WhatIf mode, changes are previewed but not applied.
 if ((-not $WhatIfPreference) -and ([string]::IsNullOrWhiteSpace($Script:logContent)) -eq $false) {
 
   # Check license availability for future user creation
+  $licenseInfo = $null
   if ([string]::IsNullOrWhiteSpace($Script:Config.Azure.LicenseId) -eq $false) {
-
-    Get-LicenseStatus -LicenseId $Script:Config.Azure.LicenseId
+    try {
+      $licenseInfo = Get-LicenseStatus -LicenseId $Script:Config.Azure.LicenseId
+    }
+    catch {
+      Write-PSLog "Failed to retrieve license status for Teams summary: $($_.Exception.Message)" -Severity Warning
+    }
   }
   $runtime = New-TimeSpan -Start $Script:StartTime -End (Get-Date)
   Write-PSLog -Message "`n Completed sync at $(Get-Date) and ran for $([math]::Round($runtime.TotalSeconds, 2)) seconds" -Severity Information
@@ -3135,10 +3143,13 @@ if ((-not $WhatIfPreference) -and ([string]::IsNullOrWhiteSpace($Script:logConte
         New-AdaptiveTextBlock -Text 'BambooHR to AAD Sync - Changes Applied' -Wrap -Weight Bolder -Color Good
         New-AdaptiveTextBlock -Text "Users Processed: $processedUserCount" -Wrap
         New-AdaptiveTextBlock -Text "Duration: $([math]::Round((New-TimeSpan -Start $Script:StartTime -End (Get-Date)).TotalMinutes, 2)) minutes" -Wrap
+        if ($licenseInfo) {
+          New-AdaptiveTextBlock -Text "Licenses: $($licenseInfo.ConsumedUnits) used, $($licenseInfo.AvailableUnits) available of $($licenseInfo.EnabledUnits) total" -Wrap
+        }
         if ($errorSummary.TotalErrors -gt 0) {
-          New-AdaptiveTextBlock -Text "Errors: $($errorSummary.TotalErrors)" -Wrap -Color Warning
+          New-AdaptiveTextBlock -Text "⚠ Errors: $($errorSummary.TotalErrors)" -Wrap -Color Warning
         } else {
-          New-AdaptiveTextBlock -Text "No errors" -Wrap -Color Good
+          New-AdaptiveTextBlock -Text "✓ No errors" -Wrap -Color Good
         }
         if ($changesSummary.Count -gt 0) {
           New-AdaptiveTextBlock -Text "`nChanges Applied:" -Wrap -Weight Bolder
@@ -3172,9 +3183,14 @@ else {
     Sync-GroupMailboxDelegation @params -DoNotConnect
   }
 
+  $licenseInfo = $null
   if ([string]::IsNullOrWhiteSpace($Script:Config.Azure.LicenseId) -eq $false) {
-
-    Get-LicenseStatus -LicenseId $Script:Config.Azure.LicenseId
+    try {
+      $licenseInfo = Get-LicenseStatus -LicenseId $Script:Config.Azure.LicenseId
+    }
+    catch {
+      Write-PSLog "Failed to retrieve license status for Teams summary: $($_.Exception.Message)" -Severity Warning
+    }
   }
 
   $runtime = New-TimeSpan -Start $Script:StartTime -End (Get-Date)
@@ -3197,6 +3213,9 @@ else {
           New-AdaptiveTextBlock -Text "Status: No changes required" -Wrap
           New-AdaptiveTextBlock -Text "Mode: WhatIf Preview" -Wrap -Color Accent
           New-AdaptiveTextBlock -Text "Duration: $([math]::Round((New-TimeSpan -Start $Script:StartTime -End (Get-Date)).TotalMinutes, 2)) minutes" -Wrap
+          if ($licenseInfo) {
+            New-AdaptiveTextBlock -Text "Licenses: $($licenseInfo.ConsumedUnits) used, $($licenseInfo.AvailableUnits) available of $($licenseInfo.EnabledUnits) total" -Wrap
+          }
           New-AdaptiveTextBlock -Text "Timestamp: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -Wrap
         } -Uri $Script:Config.Features.TeamsCardUri -Speak 'BambooHR to AAD sync completed with no changes'
         Write-PSLog 'Teams notification sent: No changes made' -Severity Information
@@ -3213,6 +3232,9 @@ else {
         New-AdaptiveCard {
           New-AdaptiveTextBlock -Text 'BambooHR to AAD Sync Completed' -Wrap -Weight Bolder
           New-AdaptiveTextBlock -Text "Duration: $([math]::Round((New-TimeSpan -Start $Script:StartTime -End (Get-Date)).TotalMinutes, 2)) minutes" -Wrap
+          if ($licenseInfo) {
+            New-AdaptiveTextBlock -Text "Licenses: $($licenseInfo.ConsumedUnits) used, $($licenseInfo.AvailableUnits) available of $($licenseInfo.EnabledUnits) total" -Wrap
+          }
           if ($changesSummary.Count -gt 0) {
             New-AdaptiveTextBlock -Text "`nChanges Detected:" -Wrap -Weight Bolder
             $changesSummary | ForEach-Object {
