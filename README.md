@@ -1,16 +1,16 @@
 # BambooHR to Entra ID User Provisioning
 
-User provisioning from BambooHR to Microsoft Entra ID (formerly Azure Active Directory).
+User provisioning from BambooHR to Microsoft Entra ID (formerly Azure Active Directory) without a requirement for SCIM or additional licenses.
 
 ## Introduction
 
-This is a fork of the AMAZING work done by [PaulTony BHR-to-AzAd-user-Provisioning](https://github.com/PaulTony-coocoo/BHR-to-AzAD-user-provisioning). Their work saved me many hours trying to put together this myself and I'm very grateful!
+This is a fork of the AMAZING work done by PaulTony BHR-to-AzAd-user-Provisioning (which has been removed from GitHub). Their work saved me many hours trying to put this together and I'm very grateful!
 
 What is different about this from the original?
 
-1. It is focused to work for one of my projects with an attempt to make it work for other scenarios. Primarily the changes are to make this work for this project.
+1. It is focused to work for one of my projects while trying to make it generic enought to work for other scenarios. Primarily the changes are to make this work for this project.
 2. Use the [Microsoft Graph 2.x PowerShell modules](https://devblogs.microsoft.com/microsoft365dev/microsoft-graph-powershell-v2-is-now-in-public-preview-half-the-size-and-will-speed-up-your-automations/). There are some differences that forced changes.
-3. Make it run as an Azure Automation runbook or as an Azure Function. Added parameters to allow for easy customization without modifying the code, making it easier to execute it in Azure Automation or an Azure Function.
+3. Make it run as an Azure Automation runbook. Added parameters to allow for easy customization without modifying the code, making it easier to execute it in Azure Automation.
 4. My project is for a cloud-first Entra ID organization that but may also work with some hybrid user objects.
 5. I've got a _little OCD_ when it comes to silly things like variable names. Although I _really_ tried to fight my irrational desire to change them, I failed. No, there wasn't anything wrong with the original ones, just try explaining that to my OCD.
 6. If you use this, please star the repo or reach out to me.
@@ -21,8 +21,16 @@ This section will keep track of changes made over time.
 
 ### TODO
 
-- Create an Azure ARM template for easy deployment.
-- Continue modernizing variable names from AAD to Entra ID throughout codebase.
+- Create an Azure Bicep or ARM template for easy deployment.
+
+### December 2025 changes
+
+- Added details to the Teams chat message about the changes made during the script execution.
+- Added `DaysToKeepAccountsAfterTermination` parameter. When a user has been disabled past this set days, a notification will be sent that the account needs to be deleted. Also now update the EmployeeLeaveDateTime in Entra ID to make this work better.
+
+> Note: In the future, I will probably add an option to automatically delete the account after this time. Let me know if you want this now!
+
+- Remove user location information on termination to ensure the accounts gets removed from all groups.
 
 ### October 2025 changes
 
