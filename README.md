@@ -15,6 +15,27 @@ What is different about this from the original?
 5. I've got a _little OCD_ when it comes to silly things like variable names. Although I _really_ tried to fight my irrational desire to change them, I failed. No, there wasn't anything wrong with the original ones, just try explaining that to my OCD.
 6. If you use this, please star the repo or reach out to me.
 
+## Customization via Azure Automation variable
+
+To avoid maintaining a personalized script, provide overrides in an Automation variable named `BHR_CustomizationsJson`. The script loads this JSON and applies overrides at runtime.
+
+### Example JSON to match _Start-BambooHRUserProvisioning.ps1
+
+```json
+{
+  "DaysToKeepAccountsAfterTermination": 14,
+  "MailboxDelegationParams": [
+    { "Group": "CG-SharedMailboxDelegatedAccessScheduling", "DelegateMailbox": "Scheduling" },
+    { "Group": "CG-SharedMailboxDelegatedAccessCustomerCare", "DelegateMailbox": "CustomerCare" },
+    { "Group": "CG-SharedMailboxDelegatedAccessSalesLeads", "DelegateMailbox": "Lead" },
+    { "Group": "CG-SharedMailboxDelegatedAccessSocial", "DelegateMailbox": "Social" },
+    { "Group": "CG-SharedMailboxDelegatedAccessJuneCommerce", "DelegateMailbox": "junec" }
+  ]
+}
+```
+
+You can also override values like `TeamsCardUri`, `AdminEmailAddress`, `NotificationEmailAddress`, `HelpDeskEmailAddress`, `UsageLocation`, `DaysAhead`, `EnableMobilePhoneSync`, `CurrentOnly`, `ForceSharedMailboxPermissions`, `DefaultProfilePicPath`, `EmailSignature`, and `WelcomeUserText`.
+
 ## Changes & Updates
 
 This section will keep track of changes made over time.
@@ -156,7 +177,7 @@ This is part of BambooHR and Entra ID integration process. This will ensure empl
 2. **Azure Automation Variables**: Configure the following variables in your Azure Automation account:
 
 - **BambooHrApiKey** - API key created in BambooHR (secure string)
-- **BHRCompanyName** - Company name used for the URL to access BambooHR  
+- **BHRCompanyName** - Company name used for the URL to access BambooHR
 - **CompanyName** - Your company display name
 - **TenantId** - Microsoft Tenant ID
 - **TeamsCardUri** - (Optional) Teams webhook URL for notifications

@@ -311,6 +311,25 @@ Set these in your Azure Automation account:
 | `TeamsCardUri` | String | No | Teams webhook URL for cards |
 | `LicenseId` | String | No | M365 license SKU for new users |
 | `BHRScript_MaxRetryAttempts` | Integer | No | Retry attempts (default: 3) |
+| `BHR_CustomizationsJson` | String | No | JSON overrides for environment-specific customizations |
+
+#### Customizations JSON (recommended)
+
+Use `BHR_CustomizationsJson` to override settings without maintaining a separate script. The JSON is loaded during configuration and can override parameters like `DaysToKeepAccountsAfterTermination`, `MailboxDelegationParams`, `TeamsCardUri`, `AdminEmailAddress`, `NotificationEmailAddress`, `HelpDeskEmailAddress`, `UsageLocation`, `DaysAhead`, `EnableMobilePhoneSync`, `CurrentOnly`, `ForceSharedMailboxPermissions`, `DefaultProfilePicPath`, `EmailSignature`, and `WelcomeUserText`.
+
+Example JSON matching _Start-BambooHRUserProvisioning.ps1:
+
+```json
+{
+    "DaysToKeepAccountsAfterTermination": 14,
+    "MailboxDelegationParams": [
+        { "Group": "CG-SharedMailboxDelegatedAccessSchedules", "DelegateMailbox": "Scheduling" },
+        { "Group": "CG-SharedMailboxDelegatedAccessSupport", "DelegateMailbox": "CustomerCare" },
+        { "Group": "CG-SharedMailboxDelegatedAccessLeads", "DelegateMailbox": "Lead" },
+
+    ]
+}
+```
 
 ### Command-Line Parameters
 
@@ -418,7 +437,7 @@ $bhrEmployeeNumber = "12345"
 
 # Azure AD data (target)
 $aadFirstName = "John"
-$aadJobTitle = "Engineer" 
+$aadJobTitle = "Engineer"
 $aadEmployeeNumber = "12345"
 
 # Script-level (accessible everywhere)
@@ -447,12 +466,12 @@ $MyNewParameter
 ```powershell
 function Initialize-Configuration {
     # ... existing code ...
-    
+
     $config.MySection = @{
-        MyNewParameter = if ($MyNewParameter) { $MyNewParameter } 
+        MyNewParameter = if ($MyNewParameter) { $MyNewParameter }
                         else { Get-AutomationVariable -Name 'MyNewParameter' -ErrorAction SilentlyContinue }
     }
-    
+
     # Validate if required
     if ([string]::IsNullOrWhiteSpace($config.MySection.MyNewParameter)) {
         $config.ValidationErrors += "MyNewParameter is required"
@@ -516,7 +535,7 @@ try {
 }
 catch {
     Write-PSLog "Error: $($_.Exception.Message)" -Severity Error
-    
+
     # Track in error summary
     $errorSummary.TotalErrors++
     $errorType = "MyNewErrorType"
@@ -777,7 +796,7 @@ param(
   If we found a user by UPN OR by EmployeeId, then the account exists.
   This section handles UPDATES to existing accounts.
 #>
-if (([string]::IsNullOrEmpty($aadUpnObjDetails) -eq $false) -or 
+if (([string]::IsNullOrEmpty($aadUpnObjDetails) -eq $false) -or
     ([string]::IsNullOrEmpty($aadEidObjDetails) -eq $false)) {
     # ... update logic ...
 }
@@ -785,7 +804,7 @@ if (([string]::IsNullOrEmpty($aadUpnObjDetails) -eq $false) -or
 
 ❌ **Bad:**
 ```powershell
-if (([string]::IsNullOrEmpty($aadUpnObjDetails) -eq $false) -or 
+if (([string]::IsNullOrEmpty($aadUpnObjDetails) -eq $false) -or
     ([string]::IsNullOrEmpty($aadEidObjDetails) -eq $false)) {
     # ... update logic with no explanation ...
 }
