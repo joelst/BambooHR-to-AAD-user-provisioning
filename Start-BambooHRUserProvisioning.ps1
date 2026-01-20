@@ -797,9 +797,9 @@ function Invoke-WithRetry {
 
   do {
     try {
-      Write-PSLog "[Retry] Attempting $Operation (attempt $attempt of $MaxAttempts)" -Severity Debug
+      Write-PSLog "Attempting $Operation (attempt $attempt of $MaxAttempts)" -Severity Debug
       $result = & $ScriptBlock
-      Write-PSLog "[Retry] $Operation completed successfully on attempt $attempt" -Severity Debug
+      Write-PSLog "$Operation completed successfully on attempt $attempt" -Severity Debug
       return $result
     }
     catch {
@@ -807,11 +807,11 @@ function Invoke-WithRetry {
       $isRetryable = $RetryableErrorTypes -contains $errorType
 
       if ($attempt -ge $MaxAttempts -or -not $isRetryable) {
-        Write-PSLog "[Retry] $Operation failed after $attempt attempts. Error: $($_.Exception.Message)" -Severity Error
+        Write-PSLog "$Operation failed after $attempt attempts. Error: $($_.Exception.Message)" -Severity Error
         throw
       }
 
-      Write-PSLog "[Retry] $Operation failed on attempt $attempt with retryable error ($errorType). Retrying in $delay seconds..." -Severity Warning
+      Write-PSLog "$Operation failed on attempt $attempt with retryable error ($errorType). Retrying in $delay seconds..." -Severity Warning
       Start-Sleep -Seconds $delay
 
       # Exponential backoff with jitter
@@ -1266,7 +1266,7 @@ function Get-LicenseStatus {
     $licenses | Add-Member -MemberType NoteProperty -Name 'AvailableUnits' -Value $licensesAvailable -Force
 
     if ($licensesAvailable -lt 0 -and $NewUser.IsPresent) {
-      Write-PSLog 'There are no licenses available for a newly created user!' -Severity Error
+      Write-PSLog 'There are no licenses available for a newly created user!' -Severity Warning
 
       $params = @{
         Message         = @{
