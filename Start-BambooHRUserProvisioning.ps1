@@ -537,7 +537,8 @@ function Initialize-Configuration {
       Write-Warning "HelpDeskEmailAddress not provided, using default: $script:HelpDeskEmailAddress"
     }
 
-    if ([string]::IsNullOrWhiteSpace($script:LicenseId) -or -not (Test-Path -Path $script:LicenseId)) {
+    $licensePattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    if ([string]::IsNullOrWhiteSpace($script:LicenseId) -or ($script:LicenseId -notmatch $licensePattern)) {
       Write-Warning 'LicenseId not provided or invalid.'
     }
 
@@ -2391,9 +2392,13 @@ $employees | Sort-Object -Property LastName |
                   # Give permissions to converted mailbox to previous manager
                   $mObj = Get-EXOMailbox -Anr $bhrWorkEmail
                   Write-PSLog "`t$($entraIdSupervisorEmail) being given permissions to $bhrWorkEmail now..." -Severity Information
-                  Write-PSLog "Executing: Add-MailboxPermission -Identity $($mObj.Id) -User $entraIdSupervisorEmail -AccessRights ‘FullAccess’ -Automapping:$true –inheritancetype All" -Severity Debug
-                  Add-MailboxPermission -Identity $mObj.Id -User $entraIdSupervisorEmail -AccessRights ‘FullAccess’ -Automapping:$true –inheritancetype All | Out-Null
-                  Disconnect-ExchangeOnline -Confirm:$False
+                  Write-PSLog "Executing: Add-MailboxPermission -Identity $($mObj.Id) -User $entraIdSupervisorEmail -AccessRights 'FullAccess' -Automapping:$true -InheritanceType All" -Severity Debug
+                  try {
+                    Add-MailboxPermission -Identity $mObj.Id -User $entraIdSupervisorEmail -AccessRights 'FullAccess' -Automapping:$true -InheritanceType All -ErrorAction Stop | Out-Null
+                  }
+                  catch {
+                    Write-PSLog -Message "Failed to add mailbox permission for $bhrWorkEmail to $entraIdSupervisorEmail. Error: $($_.Exception.Message)" -Severity Warning
+                  }
 
                   # Grant manager OneDrive access and send the link (30-day access window)
                   if (-not [string]::IsNullOrWhiteSpace($entraIdSupervisorEmail)) {
@@ -2724,7 +2729,12 @@ $employees | Sort-Object -Property LastName |
 
                             Write-PSLog -Message "Executing: Set-Mailbox -Identity $bhrWorkEmail -Type Regular" -Severity Debug
                             Write-PSLog -Message "Converting $bhrWorkEmail to a user mailbox..." -Severity Debug
-                            Set-Mailbox -Identity $bhrWorkEmail -Type Regular
+                            try {
+                              Set-Mailbox -Identity $bhrWorkEmail -Type Regular -ErrorAction Stop
+                            }
+                            catch {
+                              Write-PSLog -Message "Failed to convert $bhrWorkEmail to a user mailbox. Error: $($_.Exception.Message)" -Severity Warning
+                            }
 
                             # Wait for mailbox to be converted
                             Start-Sleep 60
@@ -2733,8 +2743,28 @@ $employees | Sort-Object -Property LastName |
                             $mObj = Get-EXOMailbox -Anr $bhrWorkEmail
                             Write-PSLog "`tShared permissions being revoked for $bhrWorkEmail..." -Severity Information
                             Write-PSLog "Executing: Remove-MailboxPermission -Identity $($mObj.Id) -ResetDefault" -Severity Debug
-                            Remove-MailboxPermission -Identity $mObj.Id -ResetDefault | Out-Null
-                            Disconnect-ExchangeOnline -Confirm:$False
+                            try {
+                              Remove-MailboxPermission -Identity $mObj.Id -ResetDefault -ErrorAction Stop | Out-Null
+                            }
+                            catch {
+                              Write-PSLog -Message "Failed to remove mailbox permissions for $bhrWorkEmail. Error: $($_.Exception.Message)" -Severity Warning
+                            }
+
+                            # Remove automatic replies when the account is reactivated
+                            Write-PSLog -Message "Removing automatic replies for $bhrWorkEmail" -Severity Information
+                            Write-PSLog -Message "Executing: Set-MailboxAutoReplyConfiguration -Identity $bhrWorkEmail -AutoReplyState Disabled" -Severity Debug
+                            try {
+                              Invoke-WithRetry -Operation "Disable automatic replies for: $bhrWorkEmail" -ScriptBlock {
+                                Set-MailboxAutoReplyConfiguration -Identity $bhrWorkEmail `
+                                  -AutoReplyState Disabled `
+                                  -InternalMessage '' `
+                                  -ExternalMessage '' `
+                                  -ErrorAction Stop
+                              }
+                            }
+                            catch {
+                              Write-PSLog -Message "Failed to disable automatic replies for $bhrWorkEmail. Error: $($_.Exception.Message)" -Severity Warning
+                            }
 
                             $params = @{
                               Message         = @{
@@ -3029,7 +3059,7 @@ $employees | Sort-Object -Property LastName |
                               }
                               else {
                                 $error.Clear()
-                                Write-PSLog -Message "Work Mobile Phone for '$bhrWorkEmail' changed from '$entraIdMobilePhone' to '$bhrMobilePhone'" -Severity Deb
+                                Write-PSLog -Message "Work Mobile Phone for '$bhrWorkEmail' changed from '$entraIdMobilePhone' to '$bhrMobilePhone'" -Severity Debug
                               }
                             }
                           }
