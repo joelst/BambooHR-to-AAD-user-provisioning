@@ -103,7 +103,6 @@ function Initialize-TestScriptState {
   $script:MaxRetryAttempts = 3
   $script:RetryDelaySeconds = 5
   $script:OperationTimeoutSeconds = 120
-  $script:MaxParallelUsers = 5
   $script:BatchSize = 25
   $script:CorrelationId = [Guid]::NewGuid().ToString()
   $script:StartTime = Get-Date
@@ -232,6 +231,30 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
 
       $config.IsValid | Should -BeTrue
       $config.Email.WelcomeLinksHtml | Should -Be $overrideHtml
+    }
+
+    It 'applies JSON boolean overrides for feature switches' {
+      $customJson = @{
+        EnableMobilePhoneSync         = $true
+        CurrentOnly                   = $true
+        ForceSharedMailboxPermissions = $true
+      } | ConvertTo-Json
+
+      Mock Get-AutomationVariable {
+        param([string]$Name)
+        if ($Name -eq 'BHR_CustomizationsJson') {
+          return $customJson
+        }
+        return $null
+      }
+
+      $config = Initialize-Configuration
+
+      $config.IsValid | Should -BeTrue
+      $config.Features.EnableMobilePhoneSync | Should -BeTrue
+      $config.Features.CurrentOnly | Should -BeTrue
+      $config.Features.ForceSharedMailboxPermissions | Should -BeTrue
+      $config.BambooHR.ReportsUri | Should -Match 'onlyCurrent=true'
     }
 
     It 'sets default email signature and welcome text' {

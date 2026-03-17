@@ -148,9 +148,6 @@ Specifies the initial delay in seconds between retry attempts. Default is 5 seco
 .PARAMETER OperationTimeoutSeconds
 Specifies the timeout in seconds for API operations. Default is 120 seconds.
 
-.PARAMETER MaxParallelUsers
-Specifies the maximum number of users to process in parallel. Default is 5.
-
 .PARAMETER BatchSize
 Specifies the batch size for bulk operations. Default is 25.
 
@@ -246,16 +243,16 @@ param (
 
   # Feature Flags
   [Parameter(HelpMessage = 'Enable mobile phone synchronization from BambooHR.')]
-  [switch]
-  $EnableMobilePhoneSync,
+  [bool]
+  $EnableMobilePhoneSync = $true,
 
   [Parameter(HelpMessage = 'Only retrieve current employees, not future hires.')]
-  [switch]
-  $CurrentOnly,
+  [bool]
+  $CurrentOnly = $true,
 
   [Parameter(HelpMessage = 'Force update of shared mailbox permissions.')]
-  [switch]
-  $ForceSharedMailboxPermissions,
+  [bool]
+  $ForceSharedMailboxPermissions = $false,
   # Advanced Configuration
   [Parameter(HelpMessage = 'Mailbox delegation configuration array.')]
   [ValidateNotNull()]
@@ -282,12 +279,6 @@ param (
   [ValidateRange(30, 300)]
   [int]
   $OperationTimeoutSeconds = 120,
-
-  # Performance Parameters
-  [Parameter(HelpMessage = 'Maximum number of users to process in parallel.')]
-  [ValidateRange(1, 20)]
-  [int]
-  $MaxParallelUsers = 5,
 
   [Parameter(HelpMessage = 'Batch size for bulk operations.')]
   [ValidateRange(10, 100)]
@@ -378,7 +369,6 @@ CONFIGURATION STRUCTURE:
     Azure        - Entra ID/Graph API settings
     Email        - Email notification addresses and templates
     Features     - Optional features (Teams cards, delegation, etc.)
-    Performance  - Performance optimization settings (caching, parallel)
   }
 
 HOW TO ADD NEW CONFIGURATION:
@@ -417,6 +407,14 @@ function Initialize-Configuration {
 
   Write-Verbose "[Initialize-Configuration] Starting configuration initialization with correlation ID: $Script:CorrelationId"
 
+  $toBool = {
+    param($Value)
+    if ($Value -is [System.Management.Automation.SwitchParameter]) {
+      return $Value.IsPresent
+    }
+    return [bool]$Value
+  }
+
   # Configuration object to store all settings
   $config = @{
     CorrelationId    = $Script:CorrelationId
@@ -428,7 +426,6 @@ function Initialize-Configuration {
     Azure            = @{}
     Email            = @{}
     Features         = @{}
-    Performance      = @{}
   }
 
   try {
@@ -549,7 +546,6 @@ function Initialize-Configuration {
       MaxRetryAttempts        = $script:MaxRetryAttempts
       RetryDelaySeconds       = $script:RetryDelaySeconds
       OperationTimeoutSeconds = $script:OperationTimeoutSeconds
-      MaxParallelUsers        = $script:MaxParallelUsers
       BatchSize               = $script:BatchSize
     }
 
@@ -557,7 +553,7 @@ function Initialize-Configuration {
       ApiKey      = $script:BambooHrApiKey
       CompanyName = $script:BHRCompanyName
       RootUri     = "https://api.bamboohr.com/api/gateway.php/$($script:BHRCompanyName)/v1"
-      ReportsUri  = if ($script:CurrentOnly.IsPresent) {
+      ReportsUri  = if ((& $toBool $script:CurrentOnly)) {
         "https://api.bamboohr.com/api/gateway.php/$($script:BHRCompanyName)/v1/reports/custom?format=json&onlyCurrent=true"
       }
       else {
@@ -599,9 +595,9 @@ function Initialize-Configuration {
     }
 
     $config.Features = @{
-      EnableMobilePhoneSync              = $script:EnableMobilePhoneSync.IsPresent
-      CurrentOnly                        = $script:CurrentOnly.IsPresent
-      ForceSharedMailboxPermissions      = $script:ForceSharedMailboxPermissions.IsPresent
+      EnableMobilePhoneSync              = (& $toBool $script:EnableMobilePhoneSync)
+      CurrentOnly                        = (& $toBool $script:CurrentOnly)
+      ForceSharedMailboxPermissions      = (& $toBool $script:ForceSharedMailboxPermissions)
       DaysAhead                          = $script:DaysAhead
       DaysToKeepAccountsAfterTermination = $script:DaysToKeepAccountsAfterTermination
       TeamsCardUri                       = $script:TeamsCardUri
@@ -617,11 +613,6 @@ function Initialize-Configuration {
         )
       }
       else { $script:MailboxDelegationParams }
-    }
-
-    $config.Performance = @{
-      MaxParallelUsers = $script:MaxParallelUsers
-      BatchSize        = $script:BatchSize
     }
 
     # Validate email addresses
@@ -839,12 +830,7 @@ KEY PERFORMANCE FEATURES:
    - Thread-safe on PowerShell 7+ (uses ConcurrentDictionary)
    - Falls back to regular hashtable on PowerShell 5.1
 
-2. PARALLEL PROCESSING DETECTION:
-   - Checks if PowerShell 7+ is available
-   - Enables future parallel processing of users
-   - Currently prepared but not activated (for safety)
-
-3. PERFORMANCE METRICS:
+2. PERFORMANCE METRICS:
    - Tracks script execution time
    - Calculates users per minute throughput
    - Measures cache effectiveness (hit rate)
@@ -865,22 +851,6 @@ DEVELOPER NOTE:
 - Don't cache data that changes frequently
 #>
 
-function Test-ParallelProcessingSupport {
-  <#
-  .SYNOPSIS
-  Check if PowerShell version supports parallel processing.
-
-  .DESCRIPTION
-  Tests if the current PowerShell version is 7.0 or higher, which supports ForEach-Object -Parallel.
-  Returns $true if parallel processing is available, $false otherwise.
-  #>
-  [CmdletBinding()]
-  [OutputType([bool])]
-  param()
-
-  return ($PSVersionTable.PSVersion.Major -ge 7)
-}
-
 function Initialize-PerformanceCache {
   <#
   .SYNOPSIS
@@ -896,16 +866,8 @@ function Initialize-PerformanceCache {
   [CmdletBinding()]
   param()
 
-  # Use thread-safe collections if available (PowerShell 7+)
-  if (Test-ParallelProcessingSupport) {
-    $userLookupCache = [System.Collections.Concurrent.ConcurrentDictionary[string, object]]::new()
-    $managerCache = [System.Collections.Concurrent.ConcurrentDictionary[string, object]]::new()
-  }
-  else {
-    # Use regular hashtables for PowerShell 5.1 (single-threaded)
-    $userLookupCache = @{}
-    $managerCache = @{}
-  }
+  $userLookupCache = @{}
+  $managerCache = @{}
 
   $cache = @{
     UserLookup = $userLookupCache
@@ -916,7 +878,7 @@ function Initialize-PerformanceCache {
     }
   }
 
-  Write-PSLog "Initialized performance cache (Parallel capable: $(Test-ParallelProcessingSupport))" -Severity Information | Out-Null
+  Write-PSLog 'Initialized performance cache' -Severity Information | Out-Null
   return $cache
 }
 
@@ -966,12 +928,7 @@ function Get-CachedUser {
 
     if ($user) {
       # Store in cache
-      if (Test-ParallelProcessingSupport) {
-        $Cache.UserLookup.TryAdd($UserId, $user) | Out-Null
-      }
-      else {
-        $Cache.UserLookup[$UserId] = $user
-      }
+      $Cache.UserLookup[$UserId] = $user
     }
 
     return $user
@@ -1938,11 +1895,6 @@ WHAT'S BEING INITIALIZED:
    - Identifies critical vs. non-critical failures
    - Sends email report to admins at completion
 
-4. PARALLEL PROCESSING CHECK:
-   - Detects if PowerShell 7+ is available
-   - Currently uses sequential processing for safety
-   - Infrastructure ready for future parallel implementation
-
 DEVELOPER NOTE:
 These initializations happen ONCE before the loop, not for each user.
 The actual employee processing happens in the ForEach-Object loop below.
@@ -1951,7 +1903,6 @@ The actual employee processing happens in the ForEach-Object loop below.
 # Initialize performance tracking
 [hashtable]$performanceCache = Initialize-PerformanceCache
 $processedUserCount = 0
-$parallelSupported = Test-ParallelProcessingSupport
 
 # Initialize error tracking
 $errorSummary = @{
@@ -1962,13 +1913,7 @@ $errorSummary = @{
   Warnings       = @()               # Array of warning messages
 }
 
-if ($parallelSupported -and $Script:Config.Performance.MaxParallelUsers -gt 1) {
-  Write-PSLog "Parallel processing is available and configured (Max parallel: $($Script:Config.Performance.MaxParallelUsers))" -Severity Information
-  Write-PSLog 'Note: Parallel processing is currently disabled for safety. Sequential processing will be used.' -Severity Information
-}
-else {
-  Write-PSLog "Using sequential processing (PowerShell $($PSVersionTable.PSVersion))" -Severity Information
-}
+Write-PSLog "Using sequential processing (PowerShell $($PSVersionTable.PSVersion))" -Severity Information
 #endregion Main Processing Loop Setup
 
 #region Employee Processing Pipeline
@@ -3025,7 +2970,7 @@ $employees | Sort-Object -Property LastName |
                           Write-PSLog -Message "Work phone correct $entraIdWorkEmail $entraIdWorkPhone" -Severity Debug
                         }
 
-                        if ($EnableMobilePhoneSync.IsPresent) {
+                        if ($Script:Config.Features.EnableMobilePhoneSync) {
                           [string]$entraIdMobilePhone = $entraIdMobilePhone -replace '[^0-9]', ''
                           [string]$bhrMobilePhone = $bhrMobilePhone -replace '[^0-9]', ''
                           # Check and set the mobile phone ignoring formatting

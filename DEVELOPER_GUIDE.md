@@ -189,7 +189,6 @@ $Script:Config = @{
         TeamsCardUri        # Teams webhook
     }
     Performance = @{
-        MaxParallelUsers    # Parallel processing limit
         BatchSize           # Bulk operation size
     }
 }
@@ -301,17 +300,17 @@ Write-PSLog -Message "Error: Failed to update" -Severity Error
 
 Set these in your Azure Automation account:
 
-| Variable Name | Type | Required | Description |
-|--------------|------|----------|-------------|
-| `BambooHrApiKey` | Encrypted | Yes | BambooHR API authentication key |
-| `BHRCompanyName` | String | Yes | BambooHR company subdomain |
-| `CompanyName` | String | Yes | Your company display name |
-| `TenantId` | String | Yes | Azure AD tenant ID (GUID) |
-| `AdminEmailAddress` | String | Yes | Administrator email for notifications |
-| `TeamsCardUri` | String | No | Teams webhook URL for cards |
-| `LicenseId` | String | No | M365 license SKU for new users |
-| `BHRScript_MaxRetryAttempts` | Integer | No | Retry attempts (default: 3) |
-| `BHR_CustomizationsJson` | String | No | JSON overrides for environment-specific customizations |
+| Variable Name                | Type      | Required | Description                                            |
+| ---------------------------- | --------- | -------- | ------------------------------------------------------ |
+| `BambooHrApiKey`             | Encrypted | Yes      | BambooHR API authentication key                        |
+| `BHRCompanyName`             | String    | Yes      | BambooHR company subdomain                             |
+| `CompanyName`                | String    | Yes      | Your company display name                              |
+| `TenantId`                   | String    | Yes      | Azure AD tenant ID (GUID)                              |
+| `AdminEmailAddress`          | String    | Yes      | Administrator email for notifications                  |
+| `TeamsCardUri`               | String    | No       | Teams webhook URL for cards                            |
+| `LicenseId`                  | String    | No       | M365 license SKU for new users                         |
+| `BHRScript_MaxRetryAttempts` | Integer   | No       | Retry attempts (default: 3)                            |
+| `BHR_CustomizationsJson`     | String    | No       | JSON overrides for environment-specific customizations |
 
 #### Customizations JSON (recommended)
 
@@ -382,7 +381,6 @@ The script is organized into logical regions:
    - Exponential backoff implementation
 
 6. **Performance Helper Functions** (Lines 710-900)
-   - `Test-ParallelProcessingSupport`: PS version detection
    - `Initialize-PerformanceCache`: Cache setup
    - `Get-CachedUser`: Cached user lookups
    - `Get-PerformanceStatistics`: Metrics calculation
