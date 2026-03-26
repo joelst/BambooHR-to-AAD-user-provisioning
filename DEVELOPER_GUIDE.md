@@ -334,15 +334,21 @@ Example JSON matching _Start-BambooHRUserProvisioning.ps1:
 
 Override automation variables:
 
+Parameter ordering convention for script `param()` blocks:
+
+1. Positional parameters first (lowest position index to highest)
+2. Required parameters next (`Mandatory = $true`)
+3. Remaining parameters in alphabetical order by parameter name
+
 ```powershell
 # Test mode (preview changes without applying)
 .\Start-BambooHRUserProvisioning.ps1 -TestOnly
 
 # Enable mobile phone sync
-.\Start-BambooHRUserProvisioning.ps1 -EnableMobilePhoneSync
+.\Start-BambooHRUserProvisioning.ps1 -EnableMobilePhoneSync $true
 
 # Current employees only (no pre-hires)
-.\Start-BambooHRUserProvisioning.ps1 -CurrentOnly
+.\Start-BambooHRUserProvisioning.ps1 -CurrentOnly $true
 
 # Custom retry settings
 .\Start-BambooHRUserProvisioning.ps1 -MaxRetryAttempts 5 -RetryDelaySeconds 2
