@@ -99,6 +99,8 @@ function Initialize-TestScriptState {
   $script:WelcomeUserText = ''
   $script:WelcomeLinksHtml = ''
   $script:MailboxDelegationParams = @()
+  $script:ModifiedWithinDays = 14
+  $script:FullSync = $false
   $script:LogPath = $env:TEMP
   $script:MaxRetryAttempts = 3
   $script:RetryDelaySeconds = 5
@@ -238,6 +240,7 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
       'Get-MailNicknameFromEmail',
       'Get-WorkPhoneComparisonValue',
       'Test-ShouldSyncExistingUser',
+      'Test-ShouldUpdateEmployeeId',
       'Test-IsOffboardingComplete',
       'Get-OffboardingCompletionMarker',
       'Get-OffboardingCompletionDateFromCompanyName'
@@ -487,6 +490,60 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
         -EntraIdUpnObjDetails $entraIdObj `
         -BhrEmploymentStatus 'Active' | Should -BeFalse
     }
+
+    It 'returns true for terminated employee with enabled Entra account even when last changed matches' {
+      $entraIdObj = [pscustomobject]@{ Id = '1'; UserPrincipalName = 'user@contoso.com'; AccountEnabled = $true }
+
+      Test-ShouldSyncExistingUser -EntraIdEmployeeNumber '123' `
+        -EntraIdEmployeeNumberByEid '123' `
+        -EntraIdUpnFromEidLookup 'user@contoso.com' `
+        -EntraIdUpnFromUpnLookup 'user@contoso.com' `
+        -BhrWorkEmail 'user@contoso.com' `
+        -BhrLastChanged '2026-03-26T01:00:00Z' `
+        -UpnExtensionAttribute1 '2026-03-26T01:00:00Z' `
+        -EntraIdEidObjDetails $entraIdObj `
+        -EntraIdUpnObjDetails $entraIdObj `
+        -BhrEmploymentStatus 'Terminated' | Should -BeTrue
+    }
+
+    It 'returns false for terminated employee with already-disabled Entra account when last changed matches' {
+      $entraIdObj = [pscustomobject]@{ Id = '1'; UserPrincipalName = 'user@contoso.com'; AccountEnabled = $false }
+
+      Test-ShouldSyncExistingUser -EntraIdEmployeeNumber '123' `
+        -EntraIdEmployeeNumberByEid '123' `
+        -EntraIdUpnFromEidLookup 'user@contoso.com' `
+        -EntraIdUpnFromUpnLookup 'user@contoso.com' `
+        -BhrWorkEmail 'user@contoso.com' `
+        -BhrLastChanged '2026-03-26T01:00:00Z' `
+        -UpnExtensionAttribute1 '2026-03-26T01:00:00Z' `
+        -EntraIdEidObjDetails $entraIdObj `
+        -EntraIdUpnObjDetails $entraIdObj `
+        -BhrEmploymentStatus 'Terminated' | Should -BeFalse
+    }
+  }
+
+  Context 'EmployeeId update helper' {
+    It 'allows EmployeeId updates for active users with UPN match' {
+      Test-ShouldUpdateEmployeeId -EntraIdEmployeeNumber 'LVR' `
+        -BhrEmployeeNumber '234' `
+        -EntraIdUserPrincipalName 'user@contoso.com' `
+        -BhrWorkEmail 'user@contoso.com' `
+        -BhrEmploymentStatus 'Active' `
+        -BhrAccountEnabled $true `
+        -BhrLastChanged '2026-03-26T05:34:03Z' `
+        -UpnExtensionAttribute1 '2026-03-26T02:52:09Z' | Should -BeTrue
+    }
+
+    It 'blocks EmployeeId updates for terminated inactive users' {
+      Test-ShouldUpdateEmployeeId -EntraIdEmployeeNumber 'LVR' `
+        -BhrEmployeeNumber '234' `
+        -EntraIdUserPrincipalName 'rmirouh@geckogreen.com' `
+        -BhrWorkEmail 'rmirouh@geckogreen.com' `
+        -BhrEmploymentStatus 'Terminated' `
+        -BhrAccountEnabled $false `
+        -BhrLastChanged '2026-03-26T05:34:03Z' `
+        -UpnExtensionAttribute1 '2026-03-26T02:52:09Z' | Should -BeFalse
+    }
   }
 
   Context 'Offboarding completion helpers' {
@@ -624,6 +681,66 @@ Describe 'Terminated user email-mismatch handling' {
       # This is the variable the termination block checks
       $entraIdStatus = "$($entraIdUpnObjDetails.AccountEnabled)"
       $entraIdStatus | Should -Be 'True'
+    }
+  }
+}
+
+Describe 'Delta sync filtering' {
+  Context 'Employee date filter' {
+    It 'excludes employees older than the cutoff' {
+      $cutoffDays = 14
+      $cutoff = (Get-Date).AddDays(-$cutoffDays)
+
+      $employees = @(
+        [PSCustomObject]@{ id = '1'; lastChanged = (Get-Date).AddDays(-5).ToString('o'); status = 'Active' }
+        [PSCustomObject]@{ id = '2'; lastChanged = (Get-Date).AddDays(-30).ToString('o'); status = 'Active' }
+        [PSCustomObject]@{ id = '3'; lastChanged = (Get-Date).AddDays(-30).ToString('o'); status = 'Inactive' }
+      )
+
+      $filtered = @($employees | Where-Object {
+        if ([string]::IsNullOrWhiteSpace($_.lastChanged)) { return $true }
+        try { [datetime]$_.lastChanged -ge $cutoff } catch { $true }
+      })
+
+      $filtered.Count | Should -Be 1
+      $filtered[0].id | Should -Be '1'
+    }
+
+    It 'includes employees with empty lastChanged' {
+      $cutoffDays = 14
+      $cutoff = (Get-Date).AddDays(-$cutoffDays)
+
+      $employees = @(
+        [PSCustomObject]@{ id = '1'; lastChanged = ''; status = 'Active' }
+        [PSCustomObject]@{ id = '2'; lastChanged = $null; status = 'Inactive' }
+      )
+
+      $filtered = @($employees | Where-Object {
+        if ([string]::IsNullOrWhiteSpace($_.lastChanged)) { return $true }
+        try { [datetime]$_.lastChanged -ge $cutoff } catch { $true }
+      })
+
+      $filtered.Count | Should -Be 2
+    }
+
+    It 'includes all employees when FullSync is true' {
+      $fullSync = $true
+
+      $employees = @(
+        [PSCustomObject]@{ id = '1'; lastChanged = (Get-Date).AddDays(-5).ToString('o'); status = 'Active' }
+        [PSCustomObject]@{ id = '2'; lastChanged = (Get-Date).AddDays(-90).ToString('o'); status = 'Active' }
+        [PSCustomObject]@{ id = '3'; lastChanged = (Get-Date).AddDays(-90).ToString('o'); status = 'Inactive' }
+      )
+
+      if (-not $fullSync) {
+        $cutoff = (Get-Date).AddDays(-14)
+        $employees = @($employees | Where-Object {
+          if ([string]::IsNullOrWhiteSpace($_.lastChanged)) { return $true }
+          try { [datetime]$_.lastChanged -ge $cutoff } catch { $true }
+        })
+      }
+
+      $employees.Count | Should -Be 3
     }
   }
 }

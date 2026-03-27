@@ -157,6 +157,14 @@ A two letter country code (ISO standard 3166) to set Entra ID usage location.
 Required for users that will be assigned licenses due to legal requirement to check for availability of services
  in countries. Examples include: US, JP, and GB.
 
+.PARAMETER ModifiedWithinDays
+Only process employees whose BambooHR lastChanged timestamp falls within this many days.
+Default is 14. Ignored when -FullSync is specified.
+
+.PARAMETER FullSync
+Bypass the ModifiedWithinDays filter and process all employees. Use this for periodic
+catch-all runs to ensure no changes are missed.
+
 .PARAMETER WhatIf
 Shows what would happen if the cmdlet runs. The cmdlet is not run. Use this to preview changes.
 
@@ -282,7 +290,16 @@ param (
 
   [Parameter(HelpMessage = 'Welcome message text for new users.')]
   [string]
-  $WelcomeUserText
+  $WelcomeUserText,
+
+  [Parameter(HelpMessage = 'Only process employees modified within this many days. Default is 21. Ignored when -FullSync is specified.')]
+  [ValidateRange(1, 365)]
+  [int]
+  $ModifiedWithinDays = 21,
+
+  [Parameter(HelpMessage = 'Bypass the ModifiedWithinDays filter and process all employees.')]
+  [bool]
+  $FullSync = $false
 )
 
 # Script-level variables
@@ -497,6 +514,11 @@ function Initialize-Configuration {
         if ($custom.WelcomeUserText) { $script:WelcomeUserText = $custom.WelcomeUserText }
         if ($custom.MailboxDelegationParams) { $script:MailboxDelegationParams = @($custom.MailboxDelegationParams) }
         if ($custom.WelcomeLinksHtml) { $script:WelcomeLinksHtml = $custom.WelcomeLinksHtml }
+        if ($null -ne $custom.ModifiedWithinDays) { $script:ModifiedWithinDays = [int]$custom.ModifiedWithinDays }
+        $fullSyncWasBound = ($null -ne $script:PSBoundParameters -and $script:PSBoundParameters.ContainsKey('FullSync'))
+        if ($null -ne $custom.FullSync -and -not $fullSyncWasBound) {
+          $script:FullSync = [bool]$custom.FullSync
+        }
 
         Write-Verbose '[Initialize-Configuration] Applied BHR_CustomizationsJson overrides'
       }
@@ -602,6 +624,8 @@ function Initialize-Configuration {
       ForceSharedMailboxPermissions      = (& $toBool $script:ForceSharedMailboxPermissions)
       DaysAhead                          = $script:DaysAhead
       DaysToKeepAccountsAfterTermination = $script:DaysToKeepAccountsAfterTermination
+      ModifiedWithinDays                 = $script:ModifiedWithinDays
+      FullSync                           = (& $toBool $script:FullSync)
       TeamsCardUri                       = $script:TeamsCardUri
       DefaultProfilePicPath              = $script:DefaultProfilePicPath
       MailboxDelegationParams            = if ($script:MailboxDelegationParams.Count -eq 0) {
@@ -1125,10 +1149,73 @@ function Test-ShouldSyncExistingUser {
   $hasMatchingUpn = ($EntraIdUpnFromEidLookup -eq $BhrWorkEmail) -or ($EntraIdUpnFromUpnLookup -eq $BhrWorkEmail)
   $hasLookupResults = (@($EntraIdEidObjDetails).Count -gt 0) -or (@($EntraIdUpnObjDetails).Count -gt 0)
 
-  return ($hasMatchingEmployeeId -or $hasMatchingUpn) -and
-  ($BhrLastChanged -ne $UpnExtensionAttribute1) -and
-  $hasLookupResults -and
-  ($BhrEmploymentStatus -notlike '*suspended*')
+  # Always process terminated employees whose Entra account is still enabled,
+  # even when the lastChanged date already matches ExtensionAttribute1.
+  $entraIdEnabled = if ($EntraIdUpnObjDetails) {
+    [bool]$EntraIdUpnObjDetails.AccountEnabled
+  }
+  elseif ($EntraIdEidObjDetails) {
+    [bool]$EntraIdEidObjDetails.AccountEnabled
+  }
+  else {
+    $false
+  }
+  $needsOffboarding = ($BhrEmploymentStatus -like '*Terminated*') -and $entraIdEnabled -and $hasLookupResults
+
+  return $needsOffboarding -or (
+    ($hasMatchingEmployeeId -or $hasMatchingUpn) -and
+    ($BhrLastChanged -ne $UpnExtensionAttribute1) -and
+    $hasLookupResults -and
+    ($BhrEmploymentStatus -notlike '*suspended*')
+  )
+}
+
+function Test-ShouldUpdateEmployeeId {
+  <#
+  .SYNOPSIS
+  Determine whether EmployeeId should be updated from BambooHR.
+
+  .DESCRIPTION
+  Terminated inactive users are excluded so offboarded accounts retain the
+  termination marker EmployeeId value until they are explicitly re-enabled.
+  #>
+  [CmdletBinding()]
+  [OutputType([bool])]
+  param(
+    [Parameter()]
+    [string]$EntraIdEmployeeNumber,
+
+    [Parameter()]
+    [string]$BhrEmployeeNumber,
+
+    [Parameter()]
+    [string]$EntraIdUserPrincipalName,
+
+    [Parameter()]
+    [string]$BhrWorkEmail,
+
+    [Parameter()]
+    [string]$BhrEmploymentStatus,
+
+    [Parameter()]
+    [bool]$BhrAccountEnabled,
+
+    [Parameter()]
+    [string]$BhrLastChanged,
+
+    [Parameter()]
+    [string]$UpnExtensionAttribute1
+  )
+
+  $employmentStatus = if ([string]::IsNullOrWhiteSpace($BhrEmploymentStatus)) { '' } else { $BhrEmploymentStatus.Trim() }
+  if ((-not $BhrAccountEnabled) -and ($employmentStatus -eq 'Terminated')) {
+    return $false
+  }
+
+  return ($EntraIdEmployeeNumber -ne $BhrEmployeeNumber) -and
+  ($EntraIdUserPrincipalName -eq $BhrWorkEmail) -and
+  ($employmentStatus -notlike '*suspended*') -and
+  ($BhrLastChanged -ne $UpnExtensionAttribute1)
 }
 
 function Test-IsOffboardingComplete {
@@ -2466,6 +2553,21 @@ catch {
 $employees = $response.employees
 $response = $null
 
+# Delta sync: filter employees to only those modified within the configured window
+if ($Script:Config.Features.FullSync) {
+  Write-PSLog "Full sync: processing all $($employees.Count) employees (no date filter applied)" -Severity Information
+}
+else {
+  $deltaCutoff = (Get-Date).AddDays(-$Script:Config.Features.ModifiedWithinDays)
+  $totalCount = $employees.Count
+  $employees = @($employees | Where-Object {
+      if ([string]::IsNullOrWhiteSpace($_.lastChanged)) { return $true }
+      try { [datetime]$_.lastChanged -ge $deltaCutoff } catch { $true }
+    })
+  Write-PSLog "Delta sync: $($employees.Count) of $totalCount employees modified within the last $($Script:Config.Features.ModifiedWithinDays) days" -Severity Information
+  Write-PSLog 'Ensure a -FullSync run is scheduled daily or weekly so no changes are missed.' -Severity Warning
+}
+
 # Connect to Microsoft Graph using PS Graph Module, authenticating as the configured service principal for this operation,
 # with certificate auth
 $error.Clear()
@@ -2760,7 +2862,7 @@ $employees | Sort-Object -Property LastName |
           $entraIdWorkEmail = "$($entraIdUpnObjDetails.Mail)"
           $entraIdJobTitle = "$($entraIdUpnObjDetails.JobTitle)"
           $entraIdDepartment = "$($entraIdUpnObjDetails.Department)"
-          $entraIdStatus = "$($entraIdUpnObjDetails.AccountEnabled)"
+          [bool]$entraIdStatus = [bool]$entraIdUpnObjDetails.AccountEnabled
           $entraIdEmployeeNumber = "$($entraIdUpnObjDetails.EmployeeId)"
           $entraIdEmployeeNumber2 = "$($entraIdEidObjDetails.EmployeeId)"
           $entraIdSupervisorEmail = "$(($entraIdUpnObjDetails |
@@ -2838,8 +2940,14 @@ $employees | Sort-Object -Property LastName |
             - Data migration issues
             In this case, we update the EmployeeId in Entra ID to match BambooHR.
             #>
-            if (($entraIdEmployeeNumber -ne $bhrEmployeeNumber) -and ($entraIdUpnObjDetails.UserPrincipalName -eq $bhrWorkEmail) -and `
-                $bhrEmploymentStatus -notlike '*suspended*' -and $bhrLastChanged -ne $UpnExtensionAttribute1) {
+            if (Test-ShouldUpdateEmployeeId -EntraIdEmployeeNumber $entraIdEmployeeNumber `
+                -BhrEmployeeNumber $bhrEmployeeNumber `
+                -EntraIdUserPrincipalName $entraIdUpnObjDetails.UserPrincipalName `
+                -BhrWorkEmail $bhrWorkEmail `
+                -BhrEmploymentStatus $bhrEmploymentStatus `
+                -BhrAccountEnabled $bhrAccountEnabled `
+                -BhrLastChanged $bhrLastChanged `
+                -UpnExtensionAttribute1 $UpnExtensionAttribute1) {
               # Employee number in Entra Id does not match the one in BambooHR, but the UPN matches. Update the employee number in Entra ID.
               Write-PSLog -Message "Entra Id Employee number $entraIdEmployeeNumber does not match BambooHR $bhrEmployeeNumber, but the UPN matches. Update the employee number in Entra ID." -Severity Debug
               $error.clear()
@@ -3915,13 +4023,13 @@ $employees | Sort-Object -Property LastName |
                       }
                     }
                     else {
-                      Write-PSLog -Message "No Entra ID user found for $bhrWorkEmail" -Severity Debug
+                      Write-PSLog -Message "Entra ID user found for $bhrWorkEmail but no attribute sync needed (last changed dates match or user is suspended)" -Severity Debug
 
                       # This might not be needed anymore
                       $entraIdWorkEmail = ''
                       $entraIdJobTitle = ''
                       $entraIdDepartment = ''
-                      $entraIdStatus = ''
+                      $entraIdStatus = $false
                       $entraIdEmployeeNumber = ''
                       $entraIdSupervisorEmail = ''
                       $entraIdDisplayname = ''
