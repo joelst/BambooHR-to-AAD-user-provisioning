@@ -36,6 +36,42 @@ To avoid maintaining a personalized script, provide overrides in an Automation v
 
 You can also override values like `TeamsCardUri`, `AdminEmailAddress`, `NotificationEmailAddress`, `HelpDeskEmailAddress`, `UsageLocation`, `DaysAhead`, `EnableMobilePhoneSync`, `CurrentOnly`, `ForceSharedMailboxPermissions`, `DefaultProfilePicPath`, `EmailSignature`, and `WelcomeUserText`.
 
+## Webhook-triggered sync
+
+In addition to the scheduled reconciliation runbook, this repo now includes a standalone webhook-focused runbook:
+
+- `Start-BambooHRUserProvisioning.ps1` - scheduled reconciliation / catch-up sync
+- `Start-BambooHrWebhookSync.ps1` - targeted sync for BambooHR webhook events
+
+The webhook runbook is meant to process only the employees identified in a BambooHR webhook payload while reusing the same core Entra ID lifecycle rules.
+
+### Why keep both?
+
+1. **Webhook runbook** gives faster reaction to employee changes.
+2. **Scheduled runbook** remains the safety net for missed events, reconciliation, and broader periodic checks.
+
+### Azure Automation setup
+
+1. Publish `Start-BambooHrWebhookSync.ps1` as a separate PowerShell 7 runbook.
+2. Create an **Azure Automation webhook** that points to this runbook.
+3. Store the webhook URL securely when it is created. Azure only shows it once.
+4. Optionally create a secure Automation variable named `BambooHrWebhookPrivateKey` if you want the runbook to validate BambooHR's HMAC signature headers.
+
+> **Important:** Azure Automation webhooks are bearer-secret URLs. Treat them like passwords.
+
+### BambooHR setup
+
+Use a **Global Webhook** in BambooHR first for the simplest admin-managed integration.
+
+Recommended settings:
+
+1. **Destination URL:** the Azure Automation webhook URL
+2. **Format:** `JSON`
+3. **Monitor fields:** Work Email, Hire Date, Status / Employment Status, Reporting To, Job Title, Department, Division, Location, Mobile Phone / Work Phone, and other fields that materially affect provisioning decisions
+4. **Posted fields:** employee identifier, work email, action, timestamp, and a few human-readable fields for logging
+
+The runbook treats the webhook payload as a **change signal**, then re-reads BambooHR to retrieve the latest authoritative employee data before making changes in Entra ID.
+
 ## Changes & Updates
 
 This section will keep track of changes made over time.
@@ -43,6 +79,18 @@ This section will keep track of changes made over time.
 ### TODO
 
 - Create an Azure Bicep or ARM template for easy deployment.
+
+### March 2026 changes
+
+- Added `FullSync` and `ModifiedWithinDays` parameters. Delta sync (processing only recently modified employees) is now the default; `ModifiedWithinDays` controls the lookback window (default: 2 days). Pass `FullSync = $true` to process all employees regardless of last-changed date.
+- Refactored feature-toggle parameters from `[switch]` to `[bool]` for Azure Automation runbook compatibility. Removed `MaxParallelUsers`.
+- Significantly expanded Pester test suite: introduced AST-based function extraction (`Get-FunctionDefinitionsFromFile`), static variable-reference validation, and new tests covering hire date conversion, tenant email validation, phone number comparison, and offboarding completion markers.
+
+### January 2026 changes
+
+- Expanded offboarding pipeline with four new steps: removes the user's FIDO2 passkeys, reassigns all owned groups to the former manager, removes the user from all group memberships, and strips mailbox permissions.
+- Improved error handling for mailbox permission removal and shared mailbox conversion failures; errors are now logged individually with clearer messages.
+- Added `LicenseId` format validation with improved failure logging when the license check cannot complete.
 
 ### December 2025 changes
 
@@ -170,9 +218,9 @@ This is part of BambooHR and Entra ID integration process. This will ensure empl
 
 ### Prerequisites
 
-1. **Entra ID Application Registration**: Create an Entra ID Enterprise application with managed identity for unattended authentication
-   - Required Graph API permissions: `User.ReadWrite.All`, `Directory.ReadWrite.All`, `Mail.Send`
+1. **Azure Automation Account with System-Assigned Managed Identity**: Use a **system-assigned** managed identity (not user-assigned) so the identity lifecycle is tied to the Automation Account itself. If the account is deleted, the identity and its permissions are automatically revoked.
    - Review [Add-ManagedIdentityPermissions.ps1](./Add-ManagedIdentityPermissions.ps1) for permission setup
+   - See [Security Hardening](#security-hardening) below for required access controls
 
 2. **Azure Automation Variables**: Configure the following variables in your Azure Automation account:
 
@@ -185,9 +233,137 @@ This is part of BambooHR and Entra ID integration process. This will ensure empl
 - **NotificationEmailAddress** - (Optional) HR notification email address (falls back to generated default)
 - **HelpDeskEmailAddress** - (Optional) Help desk email for user support (falls back to generated default)
 
-2. Required modules: Microsoft Graph 2.x, ExchangeOnlineManagement, PSTeams
+2. **Required modules**:
+   - `Microsoft.Graph.Users`, `Microsoft.Graph.Authentication`, `Microsoft.Graph.Identity.DirectoryManagement`, `Microsoft.Graph.Identity.SignIns`, `Microsoft.Graph.Groups`, `Microsoft.Graph.Calendar`, `Microsoft.Graph.Files`
+   - `ExchangeOnlineManagement`, `PSTeams`
+   - **Optional** (script degrades gracefully): `Microsoft.Graph.DeviceManagement`, `Microsoft.Graph.DeviceManagement.Enrollment`, `Microsoft.Graph.Applications`
 
 3. **Test thoroughly**: Always run with `-WhatIf` parameter first to preview changes before applying them.
+
+### Security Hardening
+
+This runbook's managed identity holds broad Graph API permissions (User.ReadWrite.All, Directory.ReadWrite.All, Mail.Send, Device.ReadWrite.All, and more). Anyone who can run a job in this Automation Account can exercise those permissions. The following controls are **strongly recommended**:
+
+#### Use a System-Assigned Managed Identity
+
+- **System-assigned** (not user-assigned) ties the identity lifecycle to the Automation Account. Deleting the account automatically revokes all permissions.
+- A user-assigned identity can be attached to other resources, expanding the blast radius if any of them are compromised.
+- Enable it under **Automation Account > Identity > System assigned > Status: On**.
+
+#### Restrict Access to the Automation Account
+
+- Assign Azure RBAC on the Automation Account resource to **only** privileged administrators who need to manage runbooks. Remove `Contributor` or `Owner` at the resource-group level for non-admin users.
+- Recommended role assignments:
+  | Role                     | Who                                  | Why                                                     |
+  | ------------------------ | ------------------------------------ | ------------------------------------------------------- |
+  | `Automation Contributor` | IT admins who manage runbooks        | Can edit/run jobs but not manage account-level settings |
+  | `Automation Operator`    | Operators who trigger scheduled runs | Can start jobs but cannot edit runbook code             |
+  | `Reader`                 | Auditors                             | Can view logs but not modify or execute                 |
+- **Do not** grant `Automation Contributor` or `Automation Operator` to general staff, help desk, or service accounts that don't need it.
+- Consider using [Azure PIM (Privileged Identity Management)](https://learn.microsoft.com/en-us/entra/id-governance/privileged-identity-management/pim-configure) for just-in-time elevation to these roles.
+
+#### Limit Network and API Exposure
+
+- If your tenant supports it, use [Conditional Access for workload identities](https://learn.microsoft.com/en-us/entra/identity/conditional-access/workload-identity) to restrict the managed identity to specific IP ranges (the Automation Account's outbound IPs).
+- **Do not** expose the Automation Account's webhook URL (if configured) to untrusted networks.
+
+#### Audit and Monitor
+
+- Enable **Diagnostic Settings** on the Automation Account to send job logs to a Log Analytics workspace.
+- Create an alert rule for unexpected job executions (e.g., jobs started outside scheduled windows or by unfamiliar principals).
+- Periodically review the managed identity's app role assignments in **Entra ID > Enterprise Applications > (your Automation Account name) > Permissions**.
+
+#### Microsoft Sentinel / Log Analytics Detections
+
+If you use Microsoft Sentinel (or a Log Analytics workspace with Entra ID audit and sign-in logs), the following analytics rules are recommended to detect misuse of the managed identity or the Automation Account.
+
+**1. Managed identity used outside expected schedule**
+
+The runbook should only run during its scheduled windows. Any Graph API activity from the identity at other times is suspicious.
+
+```kql
+// Alert: Managed identity sign-in outside business hours or scheduled window
+// Prerequisite: Entra ID sign-in logs sent to Log Analytics (AADServicePrincipalSignInLogs)
+let automationAccountName = "<your-automation-account-name>";
+let allowedHoursUtc = dynamic([6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]); // adjust to your schedule
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(1d)
+| where ServicePrincipalName =~ automationAccountName
+| where hourofday(TimeGenerated) !in (allowedHoursUtc)
+| project TimeGenerated, ServicePrincipalName, ServicePrincipalId, IPAddress, ResourceDisplayName, ResultType
+```
+
+**2. App role assignments added or removed from the managed identity**
+
+Detects someone granting additional Graph permissions to the identity (privilege escalation).
+
+```kql
+// Alert: App role assignment changed for the Automation Account managed identity
+// Prerequisite: Entra ID audit logs (AuditLogs)
+let managedIdentityObjectId = "<your-managed-identity-object-id>";
+AuditLogs
+| where TimeGenerated > ago(7d)
+| where OperationName has_any ("Add app role assignment to service principal",
+                                "Remove app role assignment from service principal")
+| mv-expand TargetResources
+| where tostring(TargetResources.id) == managedIdentityObjectId
+| project TimeGenerated, OperationName, InitiatedBy, TargetResources, CorrelationId
+```
+
+**3. Unusual Graph API operations from the managed identity**
+
+If the identity starts performing bulk operations it normally wouldn't (e.g., reading mail content, mass user deletion), this detects the anomaly.
+
+```kql
+// Alert: Unusual resource access by the Automation Account identity
+let automationAccountName = "<your-automation-account-name>";
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(1d)
+| where ServicePrincipalName =~ automationAccountName
+| summarize CallCount = count() by ResourceDisplayName, bin(TimeGenerated, 1h)
+| where CallCount > 500  // tune threshold based on your employee count
+| project TimeGenerated, ResourceDisplayName, CallCount
+```
+
+**4. Automation Account runbook modified or created**
+
+Detects unauthorized code changes to the runbook (someone injecting malicious code that runs with the identity's permissions).
+
+```kql
+// Alert: Runbook created or updated in the Automation Account
+// Prerequisite: Azure Activity logs sent to Log Analytics
+AzureActivity
+| where TimeGenerated > ago(7d)
+| where ResourceProviderValue =~ "Microsoft.Automation"
+| where OperationNameValue has_any ("MICROSOFT.AUTOMATION/AUTOMATIONACCOUNTS/RUNBOOKS/WRITE",
+                                     "MICROSOFT.AUTOMATION/AUTOMATIONACCOUNTS/RUNBOOKS/DRAFT/WRITE",
+                                     "MICROSOFT.AUTOMATION/AUTOMATIONACCOUNTS/RUNBOOKS/PUBLISH/ACTION")
+| project TimeGenerated, Caller, CallerIpAddress, OperationNameValue, ResourceGroup, _ResourceId
+```
+
+**5. Automation job started by unexpected principal**
+
+Flags jobs started by users other than the schedule or the expected admin accounts.
+
+```kql
+// Alert: Automation job started by unfamiliar caller
+// Prerequisite: Azure Activity logs
+let allowedCallers = dynamic(["<schedule-principal-id>", "<admin-upn>"]);
+AzureActivity
+| where TimeGenerated > ago(1d)
+| where ResourceProviderValue =~ "Microsoft.Automation"
+| where OperationNameValue =~ "MICROSOFT.AUTOMATION/AUTOMATIONACCOUNTS/JOBS/WRITE"
+| where Caller !in (allowedCallers)
+| project TimeGenerated, Caller, CallerIpAddress, OperationNameValue, ResourceGroup
+```
+
+> **Tip:** Import these as **Scheduled Analytics Rules** in Sentinel with a 1-day lookback and appropriate entity mappings. For environments without Sentinel, create **Log Analytics alert rules** with the same queries.
+
+#### Additional Recommendations
+
+- Store the BambooHR API key as an **encrypted** Automation variable (not a plain-text variable).
+- Rotate the BambooHR API key on a regular schedule (e.g., quarterly).
+- If you use the shared mailbox delegation feature, the managed identity also needs the **Exchange Administrator** Entra role — review whether this is necessary for your deployment and remove it if not.
 
 > **IMPORTANT:** This is a sample solution and should be used by those comfortable testing, retesting, and validating before **even considering** using it in production. This content is provided _AS IS_ with _no_ guarantees or assumptions of quality, functionality, or support.
 
