@@ -1,0 +1,27 @@
+name: PII Scan
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  pii-scan:
+    name: Scan for PII and sensitive data
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch base branch
+        run: git fetch origin ${{ github.base_ref }}
+
+      - name: Scan diff for PII
+        shell: pwsh
+        run: ./.github/scripts/Invoke-PiiScan.ps1 -BaseRef 'origin/${{ github.base_ref }}'
