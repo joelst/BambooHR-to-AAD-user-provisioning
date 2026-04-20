@@ -1,4 +1,4 @@
-#Requires -Module Pester
+﻿#Requires -Module Pester
 #using namespace System.Management.Automation.Language
 
 
@@ -127,6 +127,7 @@ Describe 'Static validation' {
   BeforeAll {
     $script:staticRepoRoot = Split-Path -Parent $PSScriptRoot
     $script:staticStartScriptPath = Join-Path $script:staticRepoRoot 'Start-BambooHRUserProvisioning.ps1'
+    $script:staticWebhookScriptPath = Join-Path $script:staticRepoRoot 'Start-BambooHrWebhookSync.ps1'
   }
 
   It 'does not contain invalid variable references' {
@@ -140,7 +141,7 @@ Describe 'Static validation' {
     It 'source files contain no real org domain' {
       # Pattern is split across two literals so this test file does not match itself
       $bannedDomain = 'gecko' + 'green'
-      $files = Get-ChildItem -Path $script:staticRepoRoot -Include '*.ps1', '*.md', '*.json' -Recurse -File |
+      $files = Get-ChildItem -Path $script:staticRepoRoot -Include '*.ps1', '*.md', '*.json', '*.bicep', '*.bicepparam' -Recurse -File |
         Where-Object { $_.FullName -notmatch '\\\.' }
 
       $violations = @(foreach ($file in $files) {
@@ -149,6 +150,31 @@ Describe 'Static validation' {
         })
 
       $violations | Should -BeNullOrEmpty -Because 'real org domain must not appear in committed source files'
+    }
+
+    It 'uses valid HTML list markup in UPN change notifications' {
+      foreach ($path in @($script:staticStartScriptPath, $script:staticWebhookScriptPath)) {
+        $content = Get-Content -Raw -Path $path
+        $content | Should -Not -Match '<ui>'
+      }
+    }
+
+    It 'uses normalized config values in UPN change notifications' {
+      $requiredPatterns = @(
+        '\$Script:Config\.Azure\.CompanyName'
+        '\$Script:Config\.Email\.EmailSignature'
+        '\$Script:Config\.Email\.NotificationEmailAddress'
+        '\$Script:Config\.Features\.TeamsCardUri'
+      )
+
+      foreach ($path in @($script:staticStartScriptPath, $script:staticWebhookScriptPath)) {
+        $content = Get-Content -Raw -Path $path
+        $upnSection = (($content -split '# Change UserPrincipalName and send the details via email to the User')[1] -split '# Create new employee account')[0]
+
+        foreach ($pattern in $requiredPatterns) {
+          $upnSection | Should -Match $pattern
+        }
+      }
     }
   }
 }

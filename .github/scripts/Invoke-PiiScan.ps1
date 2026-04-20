@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+﻿#Requires -Version 7.0
 <#
 .SYNOPSIS
     Scans git diff output for PII and sensitive data patterns.
@@ -9,6 +9,7 @@
     - Email addresses with unrecognized domains (WARN — requires review)
     - Windows SIDs (ERROR — blocks PR)
     - Real-looking phone numbers (WARN — requires review)
+    - Secret-bearing webhook/workflow URLs with live token or signature values (ERROR — blocks PR)
 
     Exits 1 if any errors are found, 0 otherwise.
     Designed to run in GitHub Actions on pull_request events and locally.
@@ -28,6 +29,21 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Test-IsPlaceholderSecretValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Value
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $true
+    }
+
+    return $Value -match '(?i)(placeholder|example|sample|redacted|replace|changeme|todo|your-)' -or
+    $Value -match '^[<{].+[>}]$'
+}
 
 # Real org email domains — ANY email matching these patterns blocks the PR.
 # Update this list if the organization's domain ever changes.
@@ -58,14 +74,14 @@ $AllowedEmailDomains = @(
 
 $findings = [System.Collections.Generic.List[hashtable]]::new()
 
-$diffOutput = git diff "$BaseRef...HEAD" -- '*.ps1' '*.md' '*.json' '*.yml' '*.yaml' '*.txt' 2>&1
+$diffOutput = git diff "$BaseRef...HEAD" -- '*.ps1' '*.md' '*.json' '*.yml' '*.yaml' '*.txt' '*.bicep' '*.bicepparam' 2>&1
 if ($LASTEXITCODE -ne 0) {
     Write-Warning "git diff returned exit code $LASTEXITCODE — falling back to two-dot diff."
-    $diffOutput = git diff "$BaseRef" -- '*.ps1' '*.md' '*.json' '*.yml' '*.yaml' '*.txt' 2>&1
+    $diffOutput = git diff "$BaseRef" -- '*.ps1' '*.md' '*.json' '*.yml' '*.yaml' '*.txt' '*.bicep' '*.bicepparam' 2>&1
 }
 
 if (-not $diffOutput) {
-    Write-Host 'ℹ️  No relevant file changes in diff. PII scan skipped.' -ForegroundColor Cyan
+    Write-Output 'ℹ️  No relevant file changes in diff. PII scan skipped.'
     exit 0
 }
 
@@ -123,41 +139,74 @@ foreach ($line in $diffOutput) {
 
         $findings.Add(@{ Severity = 'WARN'; Source = $source; Message = "Real-looking phone number '$phone' — confirm this is fictional test data" })
     }
+
+    # --- Secret-bearing URL check ---
+    $urlMatches = [regex]::Matches($content, 'https?://[^\s''"<>]+')
+    foreach ($m in $urlMatches) {
+        $candidateUrl = $m.Value.TrimEnd('.', ',', ';', ')')
+        $uri = $null
+        if (-not [System.Uri]::TryCreate($candidateUrl, [System.UriKind]::Absolute, [ref]$uri)) { continue }
+        if ([string]::IsNullOrWhiteSpace($uri.Query)) { continue }
+
+        $queryString = $uri.Query.TrimStart('?')
+        if ([string]::IsNullOrWhiteSpace($queryString)) { continue }
+
+        foreach ($pair in ($queryString -split '&')) {
+            $parts = $pair -split '=', 2
+            if ($parts.Count -ne 2) { continue }
+
+            $parameterName = $parts[0].ToLowerInvariant()
+            if ($parameterName -notin @('token', 'sig', 'signature')) { continue }
+
+            $parameterValue = [System.Uri]::UnescapeDataString($parts[1])
+            if ($parameterValue.Length -lt 12) { continue }
+            if (Test-IsPlaceholderSecretValue -Value $parameterValue) { continue }
+
+            if ($uri.Host -imatch 'azure-automation\.net$' -and $parameterName -eq 'token') {
+                $findings.Add(@{ Severity = 'ERROR'; Source = $source; Message = 'Azure Automation webhook URL detected — this bearer-secret URL must never be committed' })
+            }
+            else {
+                $redactedUrl = "$($uri.Scheme)://$($uri.Host)$($uri.AbsolutePath)?$parameterName=<redacted>"
+                $findings.Add(@{ Severity = 'ERROR'; Source = $source; Message = "Secret-bearing URL parameter '$parameterName' detected in '$redactedUrl' — replace with a placeholder or move it to a secure variable" })
+            }
+
+            break
+        }
+    }
 }
 
 # --- Output ---
-Write-Host ''
+Write-Output ''
 
 if ($findings.Count -eq 0) {
-    Write-Host '✅ PII scan passed — no issues found.' -ForegroundColor Green
+    Write-Output '✅ PII scan passed — no issues found.'
     exit 0
 }
 
 $errors   = @($findings | Where-Object { $_.Severity -eq 'ERROR' })
 $warnings = @($findings | Where-Object { $_.Severity -eq 'WARN'  })
 
-Write-Host '──────────────────────────────────────────────' -ForegroundColor DarkGray
-Write-Host ' PII / Sensitive Data Scan Results' -ForegroundColor Cyan
-Write-Host '──────────────────────────────────────────────' -ForegroundColor DarkGray
-Write-Host ''
+Write-Output '──────────────────────────────────────────────'
+Write-Output ' PII / Sensitive Data Scan Results'
+Write-Output '──────────────────────────────────────────────'
+Write-Output ''
 
 foreach ($f in $findings) {
-    $color = if ($f.Severity -eq 'ERROR') { 'Red' } else { 'Yellow' }
-    Write-Host "[$($f.Severity)] $($f.Source)" -ForegroundColor $color
-    Write-Host "       $($f.Message)" -ForegroundColor $color
-    Write-Host ''
+    Write-Output "[$($f.Severity)] $($f.Source)"
+    Write-Output "       $($f.Message)"
+    Write-Output ''
 }
 
-Write-Host '──────────────────────────────────────────────' -ForegroundColor DarkGray
+Write-Output '──────────────────────────────────────────────'
 
 if ($errors.Count -gt 0) {
-    Write-Host "❌ $($errors.Count) error(s) found — PR is blocked until resolved." -ForegroundColor Red
-    Write-Host '   Replace real org emails / SIDs with fictional equivalents (e.g. contoso.com).' -ForegroundColor Red
-    Write-Host ''
+    Write-Output "❌ $($errors.Count) error(s) found — PR is blocked until resolved."
+    Write-Output '   Replace real org emails / SIDs with fictional equivalents and remove live bearer-secret URLs.'
+    Write-Output ''
     exit 1
 }
 
-Write-Host "⚠️  $($warnings.Count) warning(s) — review each item and confirm it is safe test data." -ForegroundColor Yellow
-Write-Host '   Warnings do not block the PR but require manual sign-off.' -ForegroundColor Yellow
-Write-Host ''
+Write-Output "⚠️  $($warnings.Count) warning(s) — review each item and confirm it is safe test data."
+Write-Output '   Warnings do not block the PR but require manual sign-off.'
+Write-Output ''
 exit 0

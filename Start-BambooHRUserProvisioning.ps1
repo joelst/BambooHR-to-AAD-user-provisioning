@@ -1,4 +1,4 @@
-#Requires -Module ExchangeOnlineManagement,PSTeams,Microsoft.Graph.Users,Microsoft.Graph.Authentication,Microsoft.Graph.Identity.DirectoryManagement,Microsoft.Graph.Identity.SignIns,Microsoft.Graph.Groups,Microsoft.Graph.Calendar,Microsoft.Graph.Files
+﻿#Requires -Module ExchangeOnlineManagement,PSTeams,Microsoft.Graph.Users,Microsoft.Graph.Authentication,Microsoft.Graph.Identity.DirectoryManagement,Microsoft.Graph.Identity.SignIns,Microsoft.Graph.Groups,Microsoft.Graph.Calendar,Microsoft.Graph.Files
 
 <#
 ===============================================================================
@@ -4379,13 +4379,15 @@ $employees | Sort-Object -Property LastName |
                   Write-PSLog -Message " Changed the current UPN:$entraIdUPN of $entraIdObjectID to $bhrWorkEmail." -Severity Warning
                   Add-SignificantChange -Category UpnChanged -User $bhrWorkEmail -Detail "$entraIdUPN -> $bhrWorkEmail"
                   Write-PSLog -Message "UPN change: $entraIdUPN -> $bhrWorkEmail" -Severity Information
+                  $upnChangeBody = @'
+<p>Your email address was changed in the {0} BambooHR. Your user account has been changed accordingly.</p><ul><li>Use your new user name: {1}</li><li>Your password has not been modified.</li></ul><br/><p>{2}</p>
+'@ -f $Script:Config.Azure.CompanyName, $bhrWorkEmail, $Script:Config.Email.EmailSignature
                   $params = @{
                     Message         = @{
                       Subject       = "Login changed for $bhrdisplayName"
                       Body          = @{
                         ContentType = 'HTML'
-                        Content     = "
-<p>Your email address was changed in the $CompanyName BambooHR. Your user account has been changed accordingly.</p><ui><li>Use your new user name: $bhrWorkEmail</li><li>Your password has not been modified.</li></ul><br/><p>$EmailSignature</p>"
+                        Content     = $upnChangeBody
                       }
                       ToRecipients  = @(
                         @{
@@ -4394,35 +4396,43 @@ $employees | Sort-Object -Property LastName |
                           }
                         }
                       )
-                      CCRecipients  = @(
-                        @{
-                          EmailAddress = @{
-                            Address = $bhrSupervisorEmail
-                          }
-                        }
-                      )
-                      BCCRecipients = @(
-                        @{
-                          EmailAddress = @{
-                            Address = $NotificationEmailAddress
-                          }
-                        }
-                      )
                     }
                     SaveToSentItems = 'True'
+                  }
+
+                  if (-not [string]::IsNullOrWhiteSpace($bhrSupervisorEmail)) {
+                    $params.Message.CCRecipients = @(
+                      @{
+                        EmailAddress = @{
+                          Address = $bhrSupervisorEmail
+                        }
+                      }
+                    )
+                  }
+
+                  if (-not [string]::IsNullOrWhiteSpace($Script:Config.Email.NotificationEmailAddress)) {
+                    $params.Message.BCCRecipients = @(
+                      @{
+                        EmailAddress = @{
+                          Address = $Script:Config.Email.NotificationEmailAddress
+                        }
+                      }
+                    )
                   }
 
                   Invoke-WithRetry -Operation 'Send email address change notification' -ScriptBlock {
                     Send-MgUserMail -BodyParameter $params -UserId $Script:Config.Email.AdminEmailAddress -Verbose
                   }
 
-                  New-AdaptiveCard {
+                  if (-not [string]::IsNullOrWhiteSpace($Script:Config.Features.TeamsCardUri)) {
+                    New-AdaptiveCard {
 
-                    New-AdaptiveTextBlock -Text "Login changed for $bhrdisplayName" -HorizontalAlignment Center -Weight Bolder -Wrap
-                    New-AdaptiveTextBlock -Text "An email address was changed in the $($Script:Config.Azure.CompanyName) BambooHR. Your user account has been changed accordingly." -Wrap
-                    New-AdaptiveTextBlock -Text "The user should use the new user name: $bhrWorkEmail" -Wrap
-                    New-AdaptiveTextBlock -Text "The user's password has not been modified." -Wrap
-                  } -Uri $TeamsCardUri -Speak "Login changed for $bhrdisplayName"
+                      New-AdaptiveTextBlock -Text "Login changed for $bhrdisplayName" -HorizontalAlignment Center -Weight Bolder -Wrap
+                      New-AdaptiveTextBlock -Text "An email address was changed in the $($Script:Config.Azure.CompanyName) BambooHR. Your user account has been changed accordingly." -Wrap
+                      New-AdaptiveTextBlock -Text "The user should use the new user name: $bhrWorkEmail" -Wrap
+                      New-AdaptiveTextBlock -Text "The user's password has not been modified." -Wrap
+                    } -Uri $Script:Config.Features.TeamsCardUri -Speak "Login changed for $bhrdisplayName"
+                  }
                 }
                 catch {
                   Write-PSLog -Message " Error changing UPN for $entraIdObjectID. `n Exception: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error

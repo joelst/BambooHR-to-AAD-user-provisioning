@@ -4,8 +4,10 @@
 
 BambooHR-to-Entra-ID user provisioning script that runs as an **Azure Automation runbook**. Single-script PowerShell solution (`Start-BambooHRUserProvisioning.ps1`) with Pester tests in `tests/`.
 
-See [README.md](../README.md) for setup, changelog, and known issues.
-See [DEVELOPER_GUIDE.md](../DEVELOPER_GUIDE.md) for architecture, script flow, and how to add features.
+See [README.md](../README.md) for the project overview, deployment entry point, and docs map.
+See [docs/development.md](../docs/development.md) for architecture, script flow, testing, and change workflow.
+See [docs/security.md](../docs/security.md) for the threat model and hardening expectations.
+See [docs/troubleshooting.md](../docs/troubleshooting.md) for common operational failure modes.
 
 ## Runtime Environment
 

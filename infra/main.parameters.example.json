@@ -1,0 +1,55 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "automationAccountName": {
+      "value": "bhr-automation-prod"
+    },
+    "adminEmailAddress": {
+      "value": ""
+    },
+    "bambooHrCompanyName": {
+      "value": "contoso"
+    },
+    "companyName": {
+      "value": "Contoso"
+    },
+    "customizationsJson": {
+      "value": "{\"UsageLocation\":\"US\",\"ModifiedWithinDays\":2,\"DaysAhead\":365,\"DaysToKeepAccountsAfterTermination\":30,\"EnableMobilePhoneSync\":false,\"ForceSharedMailboxPermissions\":false}"
+    },
+    "deltaSyncStartTime": {
+      "value": "2030-01-01T01:00:00Z"
+    },
+    "fullSyncStartTime": {
+      "value": "2030-01-05T03:00:00Z"
+    },
+    "helpDeskEmailAddress": {
+      "value": ""
+    },
+    "licenseId": {
+      "value": ""
+    },
+    "location": {
+      "value": "eastus"
+    },
+    "notificationEmailAddress": {
+      "value": ""
+    },
+    "publicNetworkAccess": {
+      "value": true
+    },
+    "runtimeModuleUpdateStartTime": {
+      "value": "2030-01-06T04:00:00Z"
+    },
+    "tenantId": {
+      "value": "00000000-0000-0000-0000-000000000000"
+    },
+    "tags": {
+      "value": {
+        "application": "bamboohr-to-entra-id",
+        "environment": "production",
+        "owner": "identity-team"
+      }
+    }
+  }
+}

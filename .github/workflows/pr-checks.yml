@@ -45,3 +45,32 @@ jobs:
             $errors | Format-Table RuleName, ScriptName, Line, Message -AutoSize
             exit 1
           }
+
+  bicep:
+    name: Bicep Validation
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bicep
+        shell: pwsh
+        run: |
+          az bicep install
+          if ($LASTEXITCODE -ne 0) {
+            throw 'az bicep install failed'
+          }
+
+      - name: Build Bicep templates
+        shell: pwsh
+        run: |
+          $templates = Get-ChildItem -Path .\infra -Filter *.bicep -File -Recurse
+          if (-not $templates) {
+            throw 'No Bicep templates were found under .\infra'
+          }
+
+          foreach ($template in $templates) {
+            az bicep build --file $template.FullName --stdout | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+              throw "Bicep build failed for $($template.FullName)"
+            }
+          }
