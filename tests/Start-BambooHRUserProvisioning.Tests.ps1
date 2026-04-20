@@ -253,6 +253,7 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
       'Get-MailNicknameFromEmail',
       'Get-WorkPhoneComparisonValue',
       'Test-ShouldSyncExistingUser',
+      'Test-ShouldSendTeamsChangesCard',
       'Test-ShouldUpdateEmployeeId',
       'Test-IsOffboardingComplete',
       'Set-TerminatedUserProfileFields',
@@ -564,6 +565,47 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
     }
   }
 
+  Context 'Teams changes card helper' {
+    It 'returns true when significant changes were applied and logged' {
+      $significantChanges = [ordered]@{
+        Created        = @{ 'user@contoso.com' = 'User Example' }
+        Disabled       = @{}
+        NameChanged    = @{}
+        UpnChanged     = @{}
+        ManagerChanged = @{}
+        UpdatedMajor   = @{}
+      }
+
+      Test-ShouldSendTeamsChangesCard -LogContent 'Completed sync' -SignificantChanges $significantChanges -WhatIfMode $false | Should -BeTrue
+    }
+
+    It 'returns false when only routine log output exists' {
+      $significantChanges = [ordered]@{
+        Created        = @{}
+        Disabled       = @{}
+        NameChanged    = @{}
+        UpnChanged     = @{}
+        ManagerChanged = @{}
+        UpdatedMajor   = @{}
+      }
+
+      Test-ShouldSendTeamsChangesCard -LogContent 'Completed sync' -SignificantChanges $significantChanges -WhatIfMode $false | Should -BeFalse
+    }
+
+    It 'returns false in WhatIf mode even when significant changes exist' {
+      $significantChanges = [ordered]@{
+        Created        = @{ 'user@contoso.com' = 'User Example' }
+        Disabled       = @{}
+        NameChanged    = @{}
+        UpnChanged     = @{}
+        ManagerChanged = @{}
+        UpdatedMajor   = @{}
+      }
+
+      Test-ShouldSendTeamsChangesCard -LogContent 'Completed sync' -SignificantChanges $significantChanges -WhatIfMode $true | Should -BeFalse
+    }
+  }
+
   Context 'EmployeeId update helper' {
     It 'allows EmployeeId updates for active users with UPN match' {
       Test-ShouldUpdateEmployeeId -EntraIdEmployeeNumber 'LVR' `
@@ -578,9 +620,9 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
 
     It 'blocks EmployeeId updates for terminated inactive users' {
       Test-ShouldUpdateEmployeeId -EntraIdEmployeeNumber 'LVR' `
-        -BhrEmployeeNumber '234' `
-        -EntraIdUserPrincipalName 'rmirouh@contoso.com' `
-        -BhrWorkEmail 'rmirouh@contoso.com' `
+        -BhrEmployeeNumber '1234' `
+        -EntraIdUserPrincipalName 'rando@contoso.com' `
+        -BhrWorkEmail 'rando@contoso.com' `
         -BhrEmploymentStatus 'Terminated' `
         -BhrAccountEnabled $false `
         -BhrLastChanged '2026-03-26T05:34:03Z' `

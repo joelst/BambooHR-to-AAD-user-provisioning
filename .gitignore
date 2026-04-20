@@ -17,3 +17,5 @@ _*.ps1
 __blobstorage__
 __queuestorage__
 __azurite_db*__.json
+JobOutput_*.txt
+

@@ -1,4 +1,4 @@
-#Requires -Module ExchangeOnlineManagement,PSTeams,Microsoft.Graph.Users,Microsoft.Graph.Authentication,Microsoft.Graph.Identity.DirectoryManagement, Microsoft.Graph.Identity.SignIns
+#Requires -Module ExchangeOnlineManagement,PSTeams,Microsoft.Graph.Users,Microsoft.Graph.Authentication,Microsoft.Graph.Identity.DirectoryManagement,Microsoft.Graph.Identity.SignIns,Microsoft.Graph.Groups,Microsoft.Graph.Calendar,Microsoft.Graph.Files
 
 <#
 ===============================================================================
@@ -29,8 +29,16 @@ REQUIRED MODULES (Install these first):
   Install-Module -Name Microsoft.Graph.Authentication -Scope CurrentUser
   Install-Module -Name Microsoft.Graph.Identity.DirectoryManagement -Scope CurrentUser
   Install-Module -Name Microsoft.Graph.Identity.SignIns -Scope CurrentUser
+  Install-Module -Name Microsoft.Graph.Groups -Scope CurrentUser
+  Install-Module -Name Microsoft.Graph.Calendar -Scope CurrentUser
+  Install-Module -Name Microsoft.Graph.Files -Scope CurrentUser
   Install-Module -Name ExchangeOnlineManagement -Scope CurrentUser
   Install-Module -Name PSTeams -Scope CurrentUser
+
+OPTIONAL MODULES (for full offboarding support — script degrades gracefully without these):
+  Install-Module -Name Microsoft.Graph.DeviceManagement -Scope CurrentUser          # Intune managed device cleanup
+  Install-Module -Name Microsoft.Graph.DeviceManagement.Enrollment -Scope CurrentUser # Autopilot device cleanup
+  Install-Module -Name Microsoft.Graph.Applications -Scope CurrentUser               # App role assignment logging
 
 AZURE AUTOMATION VARIABLES TO CONFIGURE:
   - BambooHrApiKey: Your BambooHR API key (secure string)
@@ -165,8 +173,14 @@ Default is 14. Ignored when -FullSync is specified.
 Bypass the ModifiedWithinDays filter and process all employees. Use this for periodic
 catch-all runs to ensure no changes are missed.
 
+.PARAMETER WhatIfMode
+Enable WhatIf preview mode from Azure Automation. Use this bool parameter instead of
+the -WhatIf switch, which cannot be specified on Azure Automation runbook parameters.
+When set to $true, all ShouldProcess gates return false and no changes are applied.
+
 .PARAMETER WhatIf
 Shows what would happen if the cmdlet runs. The cmdlet is not run. Use this to preview changes.
+Only works when running the script locally; use -WhatIfMode $true for Azure Automation.
 
 .PARAMETER WelcomeUserText
 Sentence to add to new user email messages specific to finding the IT helpdesk FAQ.
@@ -207,12 +221,12 @@ param (
 
   [Parameter(HelpMessage = 'Only retrieve current employees, not future hires.')]
   [bool]
-  $CurrentOnly = $true,
+  $CurrentOnly = $false,
 
   [Parameter(HelpMessage = 'Number of days ahead to provision accounts before hire date.')]
   [ValidateRange(0, 30)]
   [int]
-  $DaysAhead = 7,
+  $DaysAhead = 3,
 
   [Parameter(HelpMessage = 'Number of days to keep accounts after termination.')]
   [int]
@@ -295,12 +309,21 @@ param (
   [Parameter(HelpMessage = 'Only process employees modified within this many days. Default is 21. Ignored when -FullSync is specified.')]
   [ValidateRange(1, 365)]
   [int]
-  $ModifiedWithinDays = 21,
+  $ModifiedWithinDays = 7,
 
   [Parameter(HelpMessage = 'Bypass the ModifiedWithinDays filter and process all employees.')]
   [bool]
-  $FullSync = $false
+  $FullSync = $false,
+
+  [Parameter(HelpMessage = 'Enable WhatIf preview mode in Azure Automation. Use this instead of the -WhatIf switch which is not supported in runbooks.')]
+  [bool]
+  $WhatIfMode = $false
 )
+
+# Activate WhatIf when WhatIfMode is set (Azure Automation cannot pass -WhatIf switch)
+if ($WhatIfMode) {
+  $WhatIfPreference = $true
+}
 
 # Script-level variables
 $AzureAutomate = $true
@@ -350,6 +373,41 @@ function Add-SignificantChange {
   if ([string]::IsNullOrWhiteSpace($Script:SignificantChanges[$Category][$User]) -and -not [string]::IsNullOrWhiteSpace($Detail)) {
     $Script:SignificantChanges[$Category][$User] = $Detail
   }
+}
+
+function Test-ShouldSendTeamsChangesCard {
+  [CmdletBinding()]
+  [OutputType([bool])]
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]
+    $LogContent,
+
+    [Parameter(Mandatory = $true)]
+    [AllowNull()]
+    [System.Collections.IDictionary]
+    $SignificantChanges,
+
+    [Parameter(Mandatory = $true)]
+    [bool]
+    $WhatIfMode
+  )
+
+  $hasLogContent = ([string]::IsNullOrWhiteSpace($LogContent) -eq $false)
+  if (-not $hasLogContent -or $WhatIfMode -or $null -eq $SignificantChanges) {
+    return $false
+  }
+
+  $changeCount = 0
+  foreach ($category in $SignificantChanges.Values) {
+    if ($null -ne $category) {
+      $changeCount += $category.Count
+    }
+  }
+
+  return ($changeCount -gt 0)
 }
 
 # Connection state tracking to prevent redundant connections
@@ -459,7 +517,20 @@ function Initialize-Configuration {
         try {
           $automationValue = Get-AutomationVariable -Name $varName -ErrorAction SilentlyContinue
           if ($automationValue) {
-            Set-Variable -Name $varName -Value $automationValue -Scope Script
+            # Use switch to set each script-scoped parameter variable directly,
+            # because Set-Variable -Scope does not reliably reach the script param scope
+            # from within a function in Azure Automation's PowerShell 7 sandbox.
+            switch ($varName) {
+              'BambooHrApiKey' { $script:BambooHrApiKey = $automationValue }
+              'BHRCompanyName' { $script:BHRCompanyName = $automationValue }
+              'CompanyName' { $script:CompanyName = $automationValue }
+              'TenantId' { $script:TenantId = $automationValue }
+              'TeamsCardUri' { $script:TeamsCardUri = $automationValue }
+              'AdminEmailAddress' { $script:AdminEmailAddress = $automationValue }
+              'NotificationEmailAddress' { $script:NotificationEmailAddress = $automationValue }
+              'HelpDeskEmailAddress' { $script:HelpDeskEmailAddress = $automationValue }
+              'LicenseId' { $script:LicenseId = $automationValue }
+            }
             Write-Verbose "[Initialize-Configuration] Retrieved $varName from Azure Automation variables"
           }
         }
@@ -519,6 +590,12 @@ function Initialize-Configuration {
         if ($null -ne $custom.FullSync -and -not $fullSyncWasBound) {
           $script:FullSync = [bool]$custom.FullSync
         }
+        $whatIfModeWasBound = ($null -ne $script:PSBoundParameters -and $script:PSBoundParameters.ContainsKey('WhatIfMode'))
+        if ($null -ne $custom.WhatIfMode -and -not $whatIfModeWasBound) {
+          if ([bool]$custom.WhatIfMode) {
+            $WhatIfPreference = $true
+          }
+        }
 
         Write-Verbose '[Initialize-Configuration] Applied BHR_CustomizationsJson overrides'
       }
@@ -542,20 +619,33 @@ function Initialize-Configuration {
       }
     }
 
-    # Set default values for optional parameters
-    if ([string]::IsNullOrWhiteSpace($script:AdminEmailAddress)) {
-      $script:AdminEmailAddress = "admin@$($script:CompanyName.ToLower().Replace(' ', '')).com"
-      Write-Warning "AdminEmailAddress not provided, using default: $script:AdminEmailAddress"
+    # Set default values for optional parameters (only when CompanyName is available to derive domain)
+    Write-Verbose "[Initialize-Configuration] Pre-default state: CompanyName='$($script:CompanyName)' AdminEmail='$($script:AdminEmailAddress)' NotifEmail='$($script:NotificationEmailAddress)' HelpDesk='$($script:HelpDeskEmailAddress)'"
+    if ([string]::IsNullOrWhiteSpace($script:AdminEmailAddress) -and -not [string]::IsNullOrWhiteSpace($script:CompanyName)) {
+      $derivedDomain = $script:CompanyName.ToLower().Replace(' ', '')
+      if ([string]::IsNullOrWhiteSpace($derivedDomain)) {
+        Write-Warning "AdminEmailAddress not provided and CompanyName '$($script:CompanyName)' produces empty domain; skipping default"
+      }
+      else {
+        $script:AdminEmailAddress = "admin@$derivedDomain.com"
+        Write-Warning "AdminEmailAddress not provided, using default: $script:AdminEmailAddress"
+      }
     }
 
-    if ([string]::IsNullOrWhiteSpace($script:NotificationEmailAddress)) {
-      $script:NotificationEmailAddress = "hr@$($script:CompanyName.ToLower().Replace(' ', '')).com"
-      Write-Warning "NotificationEmailAddress not provided, using default: $script:NotificationEmailAddress"
+    if ([string]::IsNullOrWhiteSpace($script:NotificationEmailAddress) -and -not [string]::IsNullOrWhiteSpace($script:CompanyName)) {
+      $derivedDomain = $script:CompanyName.ToLower().Replace(' ', '')
+      if (-not [string]::IsNullOrWhiteSpace($derivedDomain)) {
+        $script:NotificationEmailAddress = "hr@$derivedDomain.com"
+        Write-Warning "NotificationEmailAddress not provided, using default: $script:NotificationEmailAddress"
+      }
     }
 
-    if ([string]::IsNullOrWhiteSpace($script:HelpDeskEmailAddress)) {
-      $script:HelpDeskEmailAddress = "helpdesk@$($script:CompanyName.ToLower().Replace(' ', '')).com"
-      Write-Warning "HelpDeskEmailAddress not provided, using default: $script:HelpDeskEmailAddress"
+    if ([string]::IsNullOrWhiteSpace($script:HelpDeskEmailAddress) -and -not [string]::IsNullOrWhiteSpace($script:CompanyName)) {
+      $derivedDomain = $script:CompanyName.ToLower().Replace(' ', '')
+      if (-not [string]::IsNullOrWhiteSpace($derivedDomain)) {
+        $script:HelpDeskEmailAddress = "helpdesk@$derivedDomain.com"
+        Write-Warning "HelpDeskEmailAddress not provided, using default: $script:HelpDeskEmailAddress"
+      }
     }
 
     $licensePattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
@@ -631,11 +721,8 @@ function Initialize-Configuration {
       MailboxDelegationParams            = if ($script:MailboxDelegationParams.Count -eq 0) {
         # Set default mailbox delegation configuration if none provided
         @(
-          @{ Group = 'CG-SharedMailboxDelegatedAccessMailbox1'; DelegateMailbox = 'Mailbox1' }
-          @{ Group = 'CG-SharedMailboxDelegatedAccessMailbox2'; DelegateMailbox = 'Mailbox2' }
-          @{ Group = 'CG-SharedMailboxDelegatedAccessMailbox3'; DelegateMailbox = 'Mailbox3' }
-          @{ Group = 'CG-SharedMailboxDelegatedAccessMailbox4'; DelegateMailbox = 'Mailbox4' }
-          @{ Group = 'CG-SharedMailboxDelegatedAccessMailbox5'; DelegateMailbox = 'Mailbox5' }
+          @{ Group = 'SharedMailboxAccessMailbox1'; DelegateMailbox = 'Mailbox1' }
+          @{ Group = 'SharedMailboxAccessMailbox2'; DelegateMailbox = 'Mailbox2' }
         )
       }
       else { $script:MailboxDelegationParams }
@@ -1256,9 +1343,9 @@ function Test-IsOffboardingComplete {
   }
 
   return ($CompanyName -match '^\d{2}/\d{2}/\d{2}') -and
-  ($Department -eq 'Not Active') -and
-  ($JobTitle -eq 'Not Active') -and
-  ($OfficeLocation -eq 'Not Active') -and
+  ([string]::IsNullOrWhiteSpace($Department)) -and
+  ([string]::IsNullOrWhiteSpace($JobTitle)) -and
+  ([string]::IsNullOrWhiteSpace($OfficeLocation)) -and
   $workPhoneCleared -and
   $mobilePhoneCleared
 }
@@ -1266,7 +1353,7 @@ function Test-IsOffboardingComplete {
 function Set-TerminatedUserProfileFields {
   <#
   .SYNOPSIS
-  Apply offboarding placeholders and clear phone/location details.
+  Clear profile, address, and phone fields for a terminated user and set EmployeeLeaveDateTime.
   #>
   [CmdletBinding()]
   param(
@@ -1278,15 +1365,41 @@ function Set-TerminatedUserProfileFields {
   )
 
   $leaveDateTimeUtcString = $LeaveDateTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ')
+  $profileFieldFailures = [System.Collections.Generic.List[string]]::new()
 
-  Write-PSLog -Message "Executing: Update-MgUser -UserId $UserId -Department 'Not Active' -JobTitle 'Not Active' -OfficeLocation 'Not Active' -StreetAddress `$null -City `$null -State `$null -PostalCode `$null -EmployeeLeaveDateTime '$leaveDateTimeUtcString'" -Severity Debug
-  Invoke-WithRetry -Operation "Set terminated profile placeholders for: $UserId" -ScriptBlock {
-    Update-MgUser -UserId $UserId -Department 'Not Active' -JobTitle 'Not Active' -OfficeLocation 'Not Active' -StreetAddress $null -City $null -State $null -PostalCode $null -EmployeeLeaveDateTime $LeaveDateTimeUtc -ErrorAction Stop
+  Write-PSLog -Message "Setting EmployeeLeaveDateTime for $UserId to '$leaveDateTimeUtcString'" -Severity Debug
+  try {
+    Invoke-WithRetry -Operation "Set EmployeeLeaveDateTime for: $UserId" -ScriptBlock {
+      Update-MgUser -UserId $UserId -EmployeeLeaveDateTime $LeaveDateTimeUtc -ErrorAction Stop
+    }
+  }
+  catch {
+    $profileFieldFailures.Add("Failed to set EmployeeLeaveDateTime: $($_.Exception.Message)") | Out-Null
   }
 
-  Write-PSLog -Message "Executing: Update-MgUser -UserId $UserId -BusinessPhones @() -MobilePhone `$null" -Severity Debug
-  Invoke-WithRetry -Operation "Clear terminated user phone fields for: $UserId" -ScriptBlock {
-    Update-MgUser -UserId $UserId -BusinessPhones @() -MobilePhone $null -ErrorAction Stop
+  Write-PSLog -Message "Clearing profile fields (department, jobTitle, officeLocation, mobilePhone, streetAddress, city, state, postalCode) for $UserId via Graph API" -Severity Debug
+  try {
+    Invoke-WithRetry -Operation "Clear terminated user profile and address fields for: $UserId" -ScriptBlock {
+      $clearBody = '{"department":null,"jobTitle":null,"officeLocation":null,"mobilePhone":null,"streetAddress":null,"city":null,"state":null,"postalCode":null}'
+      Invoke-MgGraphRequest -Method PATCH -Uri "https://graph.microsoft.com/v1.0/users/$UserId" -Body $clearBody -ContentType 'application/json' -ErrorAction Stop
+    }
+  }
+  catch {
+    $profileFieldFailures.Add("Failed to clear profile and address fields: $($_.Exception.Message)") | Out-Null
+  }
+
+  Write-PSLog -Message "Clearing businessPhones for $UserId" -Severity Debug
+  try {
+    Invoke-WithRetry -Operation "Clear terminated user business phones for: $UserId" -ScriptBlock {
+      Update-MgUser -UserId $UserId -BusinessPhones @() -ErrorAction Stop
+    }
+  }
+  catch {
+    $profileFieldFailures.Add("Failed to clear business phones: $($_.Exception.Message)") | Out-Null
+  }
+
+  if ($profileFieldFailures.Count -gt 0) {
+    throw "One or more terminated profile cleanup operations failed for $($UserId): $($profileFieldFailures -join '; ')"
   }
 }
 
@@ -1333,6 +1446,486 @@ function Get-OffboardingCompletionDateFromCompanyName {
   catch {
     return $null
   }
+}
+
+function Invoke-UserOffboarding {
+  <#
+  .SYNOPSIS
+  Run the idempotent offboarding steps shared between the primary and retry paths.
+
+  .DESCRIPTION
+  Executes all offboarding cleanup operations in order. Each step is wrapped in its
+  own try/catch so a failure in one does not prevent subsequent steps. The CompanyName
+  completion stamp is always written last as the transaction-commit signal.
+  #>
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory)]
+    [string] $UserId,
+
+    [Parameter(Mandatory)]
+    [string] $UserObjectId,
+
+    [Parameter(Mandatory)]
+    [datetime] $LeaveDateTimeUtc,
+
+    [Parameter()]
+    [string] $SupervisorEmail,
+
+    [Parameter()]
+    [string] $DisplayName,
+
+    [Parameter(Mandatory)]
+    [hashtable] $PerformanceCache,
+
+    [Parameter(Mandatory)]
+    [hashtable] $ErrorSummary
+  )
+
+  Write-PSLog -Message "Starting offboarding steps for $UserId" -Severity Information
+  $offboardingHardFailures = [System.Collections.Generic.List[string]]::new()
+
+  $registerOffboardingSoftFailure = {
+    param(
+      [Parameter(Mandatory = $true)]
+      [string] $Message
+    )
+
+    Write-PSLog -Message $Message -Severity Warning
+    $ErrorSummary.Warnings += $Message
+  }
+
+  $registerOffboardingHardFailure = {
+    param(
+      [Parameter(Mandatory = $true)]
+      [string] $Message,
+
+      [Parameter(Mandatory = $true)]
+      [string] $ErrorType
+    )
+
+    Write-PSLog -Message $Message -Severity Warning
+    $ErrorSummary.Warnings += $Message
+    $offboardingHardFailures.Add($Message) | Out-Null
+    $ErrorSummary.TotalErrors++
+
+    if (-not $ErrorSummary.ErrorsByType.ContainsKey($ErrorType)) {
+      $ErrorSummary.ErrorsByType[$ErrorType] = 0
+    }
+    $ErrorSummary.ErrorsByType[$ErrorType]++
+
+    if ($ErrorSummary.ErrorsByUser.ContainsKey($UserId)) {
+      if ($ErrorSummary.ErrorsByUser[$UserId] -notlike "*$Message*") {
+        $ErrorSummary.ErrorsByUser[$UserId] = "$($ErrorSummary.ErrorsByUser[$UserId]); $Message"
+      }
+    }
+    else {
+      $ErrorSummary.ErrorsByUser[$UserId] = $Message
+    }
+  }
+
+  # Step 0: Ensure account is disabled and sessions are revoked
+  try {
+    $currentUser = Get-MgUser -UserId $UserId -Property AccountEnabled -ErrorAction Stop
+    if ($currentUser.AccountEnabled) {
+      Write-PSLog -Message "$UserId is still enabled — disabling account and revoking sessions before continuing offboarding." -Severity Warning
+      Revoke-MgUserSignInSession -UserId $UserId -ErrorAction SilentlyContinue
+      Update-MgUser -UserId $UserId -AccountEnabled:$false -ErrorAction Stop
+      Write-PSLog -Message "$UserId disabled and sessions revoked." -Severity Information
+    }
+  }
+  catch {
+    & $registerOffboardingHardFailure -Message "Failed to verify/disable account for $($UserId): $($_.Exception.Message)" -ErrorType 'OffboardingDisableAccount'
+  }
+
+  # Step 1: Set terminated profile fields
+  try {
+    Set-TerminatedUserProfileFields -UserId $UserId -LeaveDateTimeUtc $LeaveDateTimeUtc
+  }
+  catch {
+    & $registerOffboardingHardFailure -Message "Failed to set terminated profile fields for $($UserId): $($_.Exception.Message)" -ErrorType 'OffboardingProfileFields'
+  }
+
+  # Step 2: Auto-reply configuration
+  try {
+    Connect-ExchangeOnlineIfNeeded -TenantId $Script:Config.Azure.TenantId
+    $supervisorContactText = if ([string]::IsNullOrWhiteSpace($SupervisorEmail)) { 'the company' } else { $SupervisorEmail }
+    $internalMessage = "I am no longer with the company. Please contact $supervisorContactText for assistance."
+    $externalMessage = "My role has changed, please contact $supervisorContactText for assistance."
+
+    Write-PSLog -Message "Setting automatic replies for $UserId" -Severity Information
+    Invoke-WithRetry -Operation "Set automatic replies for: $UserId" -ScriptBlock {
+      Set-MailboxAutoReplyConfiguration -Identity $UserId `
+        -AutoReplyState Enabled `
+        -ExternalAudience All `
+        -InternalMessage $internalMessage `
+        -ExternalMessage $externalMessage `
+        -ErrorAction Stop
+    }
+  }
+  catch {
+    & $registerOffboardingHardFailure -Message "Failed to set auto-reply for $($UserId): $($_.Exception.Message)" -ErrorType 'OffboardingAutoReply'
+  }
+
+  # Step 3: Convert mailbox to shared
+  try {
+    Connect-ExchangeOnlineIfNeeded -TenantId $Script:Config.Azure.TenantId
+    Write-PSLog -Message "Converting $UserId to a shared mailbox..." -Severity Information
+    Set-Mailbox -Identity $UserId -Type Shared -ErrorAction Stop
+    $null = Wait-ForCondition -Operation "Mailbox conversion to shared for $UserId" -TimeoutSeconds 120 -PollIntervalSeconds 10 -Condition {
+      (Get-EXOMailbox -Anr $UserId -ErrorAction Stop).RecipientTypeDetails -eq 'SharedMailbox'
+    }
+  }
+  catch {
+    $mailboxConversionMessage = $_.Exception.Message
+    if ($mailboxConversionMessage -match 'already of the type "Shared"' -or $mailboxConversionMessage -match "already of the type 'Shared'") {
+      & $registerOffboardingSoftFailure -Message "Mailbox for $UserId is already shared; continuing offboarding."
+    }
+    else {
+      & $registerOffboardingHardFailure -Message "Failed to convert mailbox to shared for $($UserId): $mailboxConversionMessage" -ErrorType 'OffboardingMailboxConversion'
+    }
+  }
+
+  # Step 4: Manager mailbox delegation
+  if (-not [string]::IsNullOrWhiteSpace($SupervisorEmail)) {
+    try {
+      Connect-ExchangeOnlineIfNeeded -TenantId $Script:Config.Azure.TenantId
+      $mObj = Get-EXOMailbox -Anr $UserId -ErrorAction Stop
+      Write-PSLog -Message "$SupervisorEmail being given FullAccess to $UserId mailbox" -Severity Information
+      Add-MailboxPermission -Identity $mObj.Id -User $SupervisorEmail -AccessRights 'FullAccess' -Automapping:$true -InheritanceType All -ErrorAction Stop | Out-Null
+    }
+    catch {
+      & $registerOffboardingHardFailure -Message "Failed to grant mailbox permission for $UserId to $($SupervisorEmail): $($_.Exception.Message)" -ErrorType 'OffboardingManagerDelegation'
+    }
+  }
+
+  # Step 5: License removal
+  try {
+    Write-PSLog -Message "Removing licenses for $UserId..." -Severity Information
+    $licenseDetails = @(Get-MgUserLicenseDetail -UserId $UserId -ErrorAction Stop)
+    foreach ($licenseDetail in $licenseDetails) {
+      try {
+        Set-MgUserLicense -UserId $UserId -RemoveLicenses $licenseDetail.SkuId -AddLicenses @{} -ErrorAction Stop
+      }
+      catch {
+        $licenseRemovalMessage = $_.Exception.Message
+        if ($licenseRemovalMessage -match 'inherited from a group membership') {
+          & $registerOffboardingSoftFailure -Message "Skipping direct license removal for $UserId on SKU $($licenseDetail.SkuId) because the license is inherited from group membership."
+        }
+        else {
+          & $registerOffboardingHardFailure -Message "Failed to remove license $($licenseDetail.SkuId) for $($UserId): $licenseRemovalMessage" -ErrorType 'OffboardingLicenseRemoval'
+        }
+      }
+    }
+  }
+  catch {
+    & $registerOffboardingHardFailure -Message "Failed to enumerate licenses for $($UserId): $($_.Exception.Message)" -ErrorType 'OffboardingLicenseRemoval'
+  }
+
+  # Step 6: Group ownership transfer to manager
+  if (-not [string]::IsNullOrWhiteSpace($SupervisorEmail)) {
+    try {
+      Write-PSLog -Message "Transferring group ownership for $UserId to $SupervisorEmail" -Severity Information
+      $managerObj = Get-MgUser -UserId $SupervisorEmail -ErrorAction SilentlyContinue
+      if ($managerObj) {
+        $ownedGroups = Get-MgUserOwnedObject -UserId $UserId -All | Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.group' }
+        foreach ($group in $ownedGroups) {
+          try {
+            $existingOwners = Get-MgGroupOwner -GroupId $group.Id -All | ForEach-Object { $_.Id }
+            if ($existingOwners -notcontains $managerObj.Id) {
+              Write-PSLog -Message "Adding manager as owner for group $($group.Id)" -Severity Debug
+              New-MgGroupOwnerByRef -GroupId $group.Id -BodyParameter @{ '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$($managerObj.Id)" }
+            }
+            if ($existingOwners -contains $UserObjectId) {
+              $removeOwnerCommand = Get-Command Remove-MgGroupOwnerByRef -ErrorAction SilentlyContinue
+              if ($removeOwnerCommand) {
+                Remove-MgGroupOwnerByRef -GroupId $group.Id -DirectoryObjectId $UserObjectId -ErrorAction Stop
+                Write-PSLog -Message "Removed $UserId as owner for group $($group.Id)" -Severity Information
+              }
+              else {
+                Write-PSLog -Message "Remove-MgGroupOwnerByRef not available; cannot remove $UserId as owner for group $($group.Id)" -Severity Warning
+              }
+            }
+          }
+          catch {
+            & $registerOffboardingHardFailure -Message "Failed to transfer ownership of group $($group.Id): $($_.Exception.Message)" -ErrorType 'OffboardingGroupOwnership'
+          }
+        }
+      }
+      else {
+        & $registerOffboardingSoftFailure -Message "Manager $SupervisorEmail not found; skipping ownership transfer for $UserId."
+      }
+    }
+    catch {
+      & $registerOffboardingHardFailure -Message "Failed to transfer group ownership for $($UserId): $($_.Exception.Message)" -ErrorType 'OffboardingGroupOwnership'
+    }
+  }
+
+  # Step 7: Group membership removal
+  Write-PSLog -Message "Removing group memberships for $UserId" -Severity Information
+  try {
+    Get-MgUserMemberOf -UserId $UserId -All -ErrorAction Stop | ForEach-Object {
+      $groupMembership = $_
+      try {
+        $groupDetails = Get-MgGroup -GroupId $groupMembership.Id -Property DisplayName, GroupTypes, MembershipRule -ErrorAction Stop
+        $groupName = if ([string]::IsNullOrWhiteSpace($groupDetails.DisplayName)) { $groupMembership.Id } else { $groupDetails.DisplayName }
+        $isDynamicGroup = (-not [string]::IsNullOrWhiteSpace($groupDetails.MembershipRule)) -or ($groupDetails.GroupTypes -contains 'DynamicMembership')
+        if ($isDynamicGroup) {
+          & $registerOffboardingSoftFailure -Message "Skipping dynamic group membership removal for $UserId from $groupName ($($groupMembership.Id))."
+        }
+        else {
+          Invoke-WithRetry -Operation "Remove group membership $($groupMembership.Id) for: $UserId" -ScriptBlock {
+            Remove-MgGroupMemberByRef -GroupId $groupMembership.Id -DirectoryObjectId $UserObjectId -ErrorAction Stop
+          }
+        }
+      }
+      catch {
+        $groupRemovalMessage = $_.Exception.Message
+        if ($groupRemovalMessage -match 'dynamic memberships?') {
+          & $registerOffboardingSoftFailure -Message "Skipping dynamic group membership removal for $UserId from $($groupMembership.Id): $groupRemovalMessage"
+        }
+        else {
+          & $registerOffboardingHardFailure -Message "Failed to remove $UserId from Entra group $($groupMembership.Id): $groupRemovalMessage" -ErrorType 'OffboardingGroupMembership'
+        }
+      }
+    }
+  }
+  catch {
+    & $registerOffboardingHardFailure -Message "Failed to enumerate group memberships for $($UserId): $($_.Exception.Message)" -ErrorType 'OffboardingGroupMembership'
+  }
+
+  # Step 8: Distribution list removal
+  Write-PSLog -Message "Removing distribution list memberships for $UserId" -Severity Information
+  try {
+    Connect-ExchangeOnlineIfNeeded -TenantId $Script:Config.Azure.TenantId
+    $distributionGroups = Get-CachedDistributionGroups -Cache $PerformanceCache
+    foreach ($distributionGroup in $distributionGroups) {
+      try {
+        $members = Get-DistributionGroupMember -Identity $distributionGroup.Identity -ResultSize Unlimited -ErrorAction SilentlyContinue |
+          Where-Object { $_.PrimarySmtpAddress -eq $UserId }
+        if ($members) {
+          Remove-DistributionGroupMember -Identity $distributionGroup.Identity -Member $UserId -BypassSecurityGroupManagerCheck -Confirm:$false -ErrorAction Stop
+          Write-PSLog -Message "Removed $UserId from distribution group $($distributionGroup.DisplayName)" -Severity Information
+        }
+      }
+      catch {
+        & $registerOffboardingHardFailure -Message "Failed to remove $UserId from distribution group $($distributionGroup.DisplayName): $($_.Exception.Message)" -ErrorType 'OffboardingDistributionGroups'
+      }
+    }
+  }
+  catch {
+    & $registerOffboardingHardFailure -Message "Failed to enumerate distribution groups: $($_.Exception.Message)" -ErrorType 'OffboardingDistributionGroups'
+  }
+
+  # Step 9: Mailbox delegate cleanup — FullAccess
+  Write-PSLog -Message "Removing mailbox delegate permissions for $UserId" -Severity Information
+  try {
+    Connect-ExchangeOnlineIfNeeded -TenantId $Script:Config.Azure.TenantId
+    $mailboxes = Get-CachedMailboxes -Cache $PerformanceCache
+    foreach ($mailbox in $mailboxes) {
+      try {
+        $fullAccessPermissions = Get-EXOMailboxPermission -Identity $mailbox.Identity -User $UserId -ErrorAction SilentlyContinue |
+          Where-Object { $_.AccessRights -contains 'FullAccess' }
+        if ($fullAccessPermissions) {
+          Remove-MailboxPermission -Identity $mailbox.Identity -User $UserId -AccessRights 'FullAccess' -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+          Write-PSLog -Message "Removed FullAccess delegate from mailbox $($mailbox.Identity)" -Severity Information
+        }
+      }
+      catch {
+        & $registerOffboardingHardFailure -Message "Failed to remove FullAccess delegate from mailbox $($mailbox.Identity): $($_.Exception.Message)" -ErrorType 'OffboardingMailboxDelegates'
+      }
+    }
+  }
+  catch {
+    & $registerOffboardingHardFailure -Message "Failed to enumerate mailboxes for delegate cleanup: $($_.Exception.Message)" -ErrorType 'OffboardingMailboxDelegates'
+  }
+
+  # Step 10: Mailbox delegate cleanup — SendAs
+  try {
+    Connect-ExchangeOnlineIfNeeded -TenantId $Script:Config.Azure.TenantId
+    $mailboxes = Get-CachedMailboxes -Cache $PerformanceCache
+    foreach ($mailbox in $mailboxes) {
+      try {
+        $sendAsPermissions = @(Get-EXORecipientPermission -Identity $mailbox.Identity -ResultSize Unlimited -ErrorAction SilentlyContinue |
+            Where-Object { $_.AccessControlType -eq 'Allow' -and $_.AccessRights -contains 'SendAs' -and ($_.Trustee -eq $UserId -or $_.Trustee -eq $UserObjectId) })
+        foreach ($sendAsPermission in $sendAsPermissions) {
+          try {
+            Remove-RecipientPermission -Identity $sendAsPermission.Identity -Trustee $UserId -AccessRights 'SendAs' -Confirm:$false -ErrorAction Stop | Out-Null
+            Write-PSLog -Message "Removed SendAs delegate from $($sendAsPermission.Identity)" -Severity Information
+          }
+          catch {
+            & $registerOffboardingHardFailure -Message "Failed to remove SendAs delegate from $($sendAsPermission.Identity): $($_.Exception.Message)" -ErrorType 'OffboardingSendAsCleanup'
+          }
+        }
+      }
+      catch {
+        & $registerOffboardingHardFailure -Message "Failed to enumerate SendAs permissions on $($mailbox.Identity): $($_.Exception.Message)" -ErrorType 'OffboardingSendAsCleanup'
+      }
+    }
+  }
+  catch {
+    & $registerOffboardingHardFailure -Message "Failed to enumerate mailboxes for SendAs cleanup for $($UserId): $($_.Exception.Message)" -ErrorType 'OffboardingSendAsCleanup'
+  }
+
+  # Step 11: Device ownership removal
+  Write-PSLog -Message "Removing device ownership for $UserId" -Severity Information
+  try {
+    $graphContextCommand = Get-Command Get-MgContext -ErrorAction SilentlyContinue
+    $graphContext = if ($graphContextCommand) { Get-MgContext } else { $null }
+    $isAppOnlyGraphContext = $false
+    if ($graphContext -and $graphContext.AuthType) {
+      $isAppOnlyGraphContext = $graphContext.AuthType.ToString() -like '*AppOnly*'
+    }
+
+    if ($isAppOnlyGraphContext) {
+      & $registerOffboardingSoftFailure -Message "Skipping device owner removal for $UserId because Microsoft Graph does not support deleting device registered owners in app-only sessions."
+    }
+    else {
+      $uDevices = Get-MgUserOwnedDevice -UserId $UserId -ErrorAction SilentlyContinue
+      foreach ($deviceObject in $uDevices) {
+        try {
+          Remove-MgDeviceRegisteredOwnerByRef -DeviceId $deviceObject.Id -DirectoryObjectId $UserObjectId -ErrorAction Stop
+          $deviceDetails = Get-MgDevice -DeviceId $deviceObject.Id -ErrorAction SilentlyContinue
+          if ($deviceDetails) {
+            $timestamp = Get-Date -Format 'yyyy-MM-dd'
+            $updatedNotes = "$($deviceDetails.Notes) | Owner $UserId removed on $timestamp"
+            Update-MgDevice -DeviceId $deviceObject.Id -BodyParameter @{ Notes = $updatedNotes } -ErrorAction SilentlyContinue
+          }
+          Write-PSLog -Message "Removed $UserId from device $($deviceObject.Id)" -Severity Information
+        }
+        catch {
+          & $registerOffboardingHardFailure -Message "Failed to remove $UserId from device $($deviceObject.Id): $($_.Exception.Message)" -ErrorType 'OffboardingDeviceOwnership'
+        }
+      }
+    }
+  }
+  catch {
+    & $registerOffboardingHardFailure -Message "Failed to enumerate devices for $($UserId): $($_.Exception.Message)" -ErrorType 'OffboardingDeviceOwnership'
+  }
+
+  # Step 12: Intune managed device cleanup
+  try {
+    $managedDeviceCommand = Get-Command Get-MgUserManagedDevice -ErrorAction SilentlyContinue
+    if ($managedDeviceCommand) {
+      $managedDevices = Get-MgUserManagedDevice -UserId $UserObjectId -All -ErrorAction Stop
+      foreach ($managedDevice in $managedDevices) {
+        Write-PSLog -Message "Intune managed device should be reset: $($managedDevice.DeviceName) ($($managedDevice.Id))" -Severity Warning
+        $updateManagedDeviceCommand = Get-Command Update-MgDeviceManagementManagedDevice -ErrorAction SilentlyContinue
+        if ($updateManagedDeviceCommand) {
+          try {
+            Update-MgDeviceManagementManagedDevice -ManagedDeviceId $managedDevice.Id -BodyParameter @{ userId = $null; userPrincipalName = $null } -ErrorAction Stop
+            Write-PSLog -Message "Cleared Intune primary user for device $($managedDevice.DeviceName)" -Severity Information
+          }
+          catch {
+            & $registerOffboardingHardFailure -Message "Failed to clear Intune primary user for $($managedDevice.DeviceName): $($_.Exception.Message)" -ErrorType 'OffboardingIntuneDevices'
+          }
+        }
+        else {
+          & $registerOffboardingSoftFailure -Message 'Update-MgDeviceManagementManagedDevice not available; cannot clear Intune primary user.'
+        }
+      }
+    }
+    else {
+      & $registerOffboardingSoftFailure -Message 'Get-MgUserManagedDevice not available; skipping Intune managed device processing.'
+    }
+  }
+  catch {
+    & $registerOffboardingHardFailure -Message "Failed to process Intune devices for $($UserId): $($_.Exception.Message)" -ErrorType 'OffboardingIntuneDevices'
+  }
+
+  # Step 13: Autopilot device cleanup
+  try {
+    $autopilotCommand = Get-Command Get-MgDeviceManagementWindowsAutopilotDeviceIdentity -ErrorAction SilentlyContinue
+    if ($autopilotCommand) {
+      $autopilotDevices = Get-CachedAutopilotDevicesForUser -Cache $PerformanceCache -UserPrincipalName $UserId
+      foreach ($autopilotDevice in $autopilotDevices) {
+        Write-PSLog -Message "Autopilot device should be reset: $($autopilotDevice.DisplayName) ($($autopilotDevice.Id))" -Severity Warning
+        $updateAutopilotCommand = Get-Command Update-MgDeviceManagementWindowsAutopilotDeviceIdentity -ErrorAction SilentlyContinue
+        if ($updateAutopilotCommand) {
+          try {
+            Update-MgDeviceManagementWindowsAutopilotDeviceIdentity -WindowsAutopilotDeviceIdentityId $autopilotDevice.Id -BodyParameter @{ assignedUserPrincipalName = $null; userPrincipalName = $null } -ErrorAction Stop
+            Write-PSLog -Message "Cleared Autopilot assigned user for $($autopilotDevice.DisplayName)" -Severity Information
+          }
+          catch {
+            & $registerOffboardingHardFailure -Message "Failed to clear Autopilot assigned user for $($autopilotDevice.DisplayName): $($_.Exception.Message)" -ErrorType 'OffboardingAutopilotDevices'
+          }
+        }
+        else {
+          & $registerOffboardingSoftFailure -Message 'Update-MgDeviceManagementWindowsAutopilotDeviceIdentity not available; cannot clear Autopilot assigned user.'
+        }
+      }
+    }
+    else {
+      & $registerOffboardingSoftFailure -Message 'Get-MgDeviceManagementWindowsAutopilotDeviceIdentity not available; skipping Autopilot processing.'
+    }
+  }
+  catch {
+    & $registerOffboardingHardFailure -Message "Failed to process Autopilot devices for $($UserId): $($_.Exception.Message)" -ErrorType 'OffboardingAutopilotDevices'
+  }
+
+  # Step 14: Auth method removal
+  Write-PSLog -Message "Removing authentication methods for $UserId" -Severity Information
+  try {
+    $authMethods = @(
+      Invoke-WithRetry -Operation "Get authentication methods for: $UserId" -ScriptBlock {
+        Get-MgUserAuthenticationMethod -UserId $UserId -ErrorAction Stop
+      }
+    )
+    foreach ($authMethod in $authMethods) {
+      $methodData = $authMethod.AdditionalProperties.Values
+      try {
+        if ($methodData -like '*phoneAuthenticationMethod*') { Remove-MgUserAuthenticationPhoneMethod -UserId $UserId -PhoneAuthenticationMethodId $authMethod.id; Write-PSLog -Message "Removed phone auth method for $UserId." -Severity Information }
+        if ($methodData -like '*microsoftAuthenticatorAuthenticationMethod*') { Remove-MgUserAuthenticationMicrosoftAuthenticatorMethod -UserId $UserId -MicrosoftAuthenticatorAuthenticationMethodId $authMethod.id; Write-PSLog -Message "Removed auth app method for $UserId." -Severity Information }
+        if ($methodData -like '*fido2AuthenticationMethod*') { Remove-MgUserAuthenticationFido2Method -UserId $UserId -Fido2AuthenticationMethodId $authMethod.id; Write-PSLog -Message "Removed passkey (FIDO2) for $UserId." -Severity Information }
+        if ($methodData -like '*windowsHelloForBusinessAuthenticationMethod*') { Remove-MgUserAuthenticationWindowsHelloForBusinessMethod -UserId $UserId -WindowsHelloForBusinessAuthenticationMethodId $authMethod.id; Write-PSLog -Message "Removed Windows Hello method for $UserId." -Severity Information }
+      }
+      catch {
+        & $registerOffboardingHardFailure -Message "Failed to remove auth method $($authMethod.id) for $($UserId): $($_.Exception.Message)" -ErrorType 'OffboardingAuthMethods'
+      }
+    }
+  }
+  catch {
+    & $registerOffboardingHardFailure -Message "Failed to process auth methods for $($UserId): $($_.Exception.Message)" -ErrorType 'OffboardingAuthMethods'
+  }
+
+  # Step 15: Manager removal
+  Write-PSLog -Message "Removing manager for $UserId" -Severity Information
+  try {
+    Remove-MgUserManagerByRef -UserId $UserId -ErrorAction Stop
+  }
+  catch {
+    & $registerOffboardingHardFailure -Message "Failed to remove manager for $($UserId): $($_.Exception.Message)" -ErrorType 'OffboardingManagerRemoval'
+  }
+
+  if ($offboardingHardFailures.Count -eq 0) {
+    # Step 16: Mark EmployeeId as 'LVR'
+    try {
+      Invoke-WithRetry -Operation "Mark user as on leave: $UserId" -ScriptBlock {
+        Update-MgUser -EmployeeId 'LVR' -UserId $UserId -ErrorAction Stop
+      }
+    }
+    catch {
+      & $registerOffboardingHardFailure -Message "Failed to mark $UserId as offboarded: $($_.Exception.Message)" -ErrorType 'OffboardingCompletion'
+    }
+  }
+
+  if ($offboardingHardFailures.Count -eq 0) {
+    # Step 17: CompanyName completion stamp — ALWAYS LAST
+    try {
+      Write-PSLog -Message "Setting CompanyName completion stamp for $UserId" -Severity Information
+      Update-MgUser -UserId $UserId -CompanyName (Get-OffboardingCompletionMarker -LeaveDateTimeUtc $LeaveDateTimeUtc) -ErrorAction Stop
+    }
+    catch {
+      & $registerOffboardingHardFailure -Message "Failed to set CompanyName completion stamp for $($UserId): $($_.Exception.Message)" -ErrorType 'OffboardingCompletion'
+    }
+  }
+
+  if ($offboardingHardFailures.Count -gt 0) {
+    Write-PSLog -Message "Skipping offboarding completion markers for $UserId because $($offboardingHardFailures.Count) hard failure(s) remain unresolved." -Severity Warning
+    return
+  }
+
+  Write-PSLog -Message "Offboarding steps completed for $UserId" -Severity Information
 }
 
 function Wait-ForCondition {
@@ -2419,20 +3012,22 @@ Write-PSLog "Executing Connect-MgGraph -TenantId $($Script:Config.Azure.TenantId
 # Ensures you do not inherit an AzContext in your runbook
 Disable-AzContextAutosave -Scope Process
 
+# Temporarily suppress WhatIfPreference for connections — these are read-only
+# operations that must succeed even in preview mode.
+$savedWhatIf = $WhatIfPreference
+$WhatIfPreference = $false
+
 # Connect to Azure with system-assigned managed identity
 if (-not $Script:AzureConnected) {
-  $AzureContext = Invoke-WithRetry -Operation 'Connect-AzAccount' -ScriptBlock {
+  Invoke-WithRetry -Operation 'Connect-AzAccount' -ScriptBlock {
     $VerbosePreference = 'SilentlyContinue'
-    (Connect-AzAccount -Identity).context
+    Connect-AzAccount -Identity | Out-Null
   }
   $Script:AzureConnected = $true
 }
 else {
   Write-PSLog 'Azure connection already established, skipping reconnection' -Severity Debug
 }
-
-# Set and store context
-$AzureContext = Set-AzContext -SubscriptionName $AzureContext.Subscription -DefaultProfile $AzureContext
 
 # Connect to Microsoft Graph
 if (-not $Script:MgGraphConnected) {
@@ -2445,6 +3040,9 @@ if (-not $Script:MgGraphConnected) {
 else {
   Write-PSLog 'Microsoft Graph connection already established, skipping reconnection' -Severity Debug
 }
+
+# Restore WhatIfPreference after connections are established
+$WhatIfPreference = $savedWhatIf
 
 # Validate Graph connection
 $testUser = Invoke-WithRetry -Operation 'Test Graph Connection' -ScriptBlock {
@@ -2486,7 +3084,7 @@ $requestBody = @{
     'status', 'hireDate', 'department', 'employeeNumber', 'firstName', 'lastName',
     'displayName', 'jobTitle', 'supervisorEmail', 'workEmail', 'lastChanged',
     'employmentHistoryStatus', 'bestEmail', 'location', 'workPhone', 'preferredName',
-    'homeEmail', 'mobilePhone'
+    'mobilePhone'
   )
 } | ConvertTo-Json
 
@@ -2755,8 +3353,12 @@ $employees | Sort-Object -Property LastName |
     $bhremployeeNumber = "$($_.employeeNumber)"     # Unique employee number
     # Job title as listed in Bamboo HR
     $bhrJobTitle = "$($_.jobTitle)"
-    # Department as listed in Bamboo HR
-    $bhrDepartment = "$($_.department)"
+    # Department as listed in Bamboo HR (Graph API limit: 64 characters, no control chars)
+    $bhrDepartment = ([regex]::Replace("$($_.department)", '[\p{C}]', '')).Trim()
+    if ($bhrDepartment.Length -gt 64) {
+      Write-PSLog -Message "Department value '$bhrDepartment' ($($bhrDepartment.Length) chars) exceeds 64-character Graph API limit for employee $($_.workEmail), truncating." -Severity Warning
+      $bhrDepartment = $bhrDepartment.Substring(0, 64).TrimEnd()
+    }
     # Supervisor email address as listed in Bamboo HR
     $bhrSupervisorEmail = "$($_.supervisorEmail)"
     # Work email address as listedin Bamboo HR
@@ -2780,7 +3382,6 @@ $employees | Sort-Object -Property LastName |
     $bhrLastName = ConvertTo-StandardName $_.lastName
     # The Display Name of the user in BambooHR
     $bhrDisplayName = ConvertTo-StandardName $_.displayName
-    $bhrHomeEmail = "$($homeEmail)"
 
     if ($bhrPreferredName -ne $bhrFirstName -and [string]::IsNullorWhitespace($bhrPreferredName) -eq $false) {
       Write-PSLog -Message "User preferred first name of $bhrPreferredName instead of legal name $bhrFirstName" -Severity Debug
@@ -2791,7 +3392,7 @@ $employees | Sort-Object -Property LastName |
     Write-PSLog -Message "BambooHR employee: $bhrFirstName $bhrLastName ($bhrDisplayName) $bhrWorkEmail" -Severity Debug
     Write-PSLog -Message "Department: $bhrDepartment, Title: $bhrJobTitle, Manager: $bhrSupervisorEmail HireDate: $bhrHireDate" -Severity Debug
     Write-PSLog -Message "EmployeeId: $bhrEmployeeNumber, Status: $bhrStatus, Employee Status: $bhrEmploymentStatus" -Severity Debug
-    Write-PSLog -Message "Location: $bhrOfficeLocation, PreferredName: $bhrPreferredName, BestEmail: $bhrBestEmail HomeEmail: $bhrHomeEmail, WorkPhone: $bhrWorkPhone" -Severity Debug
+    Write-PSLog -Message "Location: $bhrOfficeLocation, PreferredName: $bhrPreferredName, BestEmail: $bhrBestEmail, WorkPhone: $bhrWorkPhone" -Severity Debug
 
     $entraIdUpnObjDetails = $null
     $entraIdEidObjDetails = $null
@@ -2827,8 +3428,15 @@ $employees | Sort-Object -Property LastName |
       }
 
       # Lookup user by EmployeeID - capture return value from Invoke-WithRetry
-      $entraIdEidObjDetails = Invoke-WithRetry -Operation "Get user by EmployeeID: $bhrEmployeeNumber" -ScriptBlock {
-        Get-MgUser -Filter "employeeID eq '$bhrEmployeeNumber'" -Property employeeid, userprincipalname, Department, JobTitle, CompanyName, Surname, GivenName, DisplayName, MobilePhone, AccountEnabled, Mail, OfficeLocation, BusinessPhones , EmployeeHireDate, OnPremisesExtensionAttributes, AdditionalProperties -ExpandProperty manager -ErrorAction SilentlyContinue
+      # Sanitize employee number to prevent OData filter injection from BambooHR data
+      if ($bhrEmployeeNumber -notmatch '^\d{1,10}$') {
+        Write-PSLog -Message "Skipping EmployeeID lookup for '$bhrWorkEmail' — employee number '$bhrEmployeeNumber' contains invalid characters." -Severity Warning
+        $entraIdEidObjDetails = $null
+      }
+      else {
+        $entraIdEidObjDetails = Invoke-WithRetry -Operation "Get user by EmployeeID: $bhrEmployeeNumber" -ScriptBlock {
+          Get-MgUser -Filter "employeeID eq '$bhrEmployeeNumber'" -Property employeeid, userprincipalname, Department, JobTitle, CompanyName, Surname, GivenName, DisplayName, MobilePhone, AccountEnabled, Mail, OfficeLocation, BusinessPhones , EmployeeHireDate, OnPremisesExtensionAttributes, AdditionalProperties -ExpandProperty manager -ErrorAction SilentlyContinue
+        }
       }
       $error.clear()
 
@@ -2950,7 +3558,6 @@ $employees | Sort-Object -Property LastName |
                 -UpnExtensionAttribute1 $UpnExtensionAttribute1) {
               # Employee number in Entra Id does not match the one in BambooHR, but the UPN matches. Update the employee number in Entra ID.
               Write-PSLog -Message "Entra Id Employee number $entraIdEmployeeNumber does not match BambooHR $bhrEmployeeNumber, but the UPN matches. Update the employee number in Entra ID." -Severity Debug
-              $error.clear()
               if ($PSCmdlet.ShouldProcess($bhrWorkEmail, "Update EmployeeId to '$bhremployeeNumber'")) {
                 Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -EmployeeId $bhremployeeNumber" -Severity Debug
                 Invoke-WithRetry -Operation "Update user EmployeeId: $bhrWorkEmail" -ScriptBlock {
@@ -2972,7 +3579,6 @@ $employees | Sort-Object -Property LastName |
                 -BhrEmploymentStatus $bhrEmploymentStatus) {
 
               Write-PSLog -Message "$bhrWorkEmail is a valid Entra ID Account, with matching EmployeeId and UPN in Entra ID and BambooHR, but different last modified date." -Severity Debug
-              $error.clear()
 
               # Check if user is active in BambooHR, and set the status of the account as it is in BambooHR
               # (active or inactive)
@@ -2980,7 +3586,6 @@ $employees | Sort-Object -Property LastName |
                 Write-PSLog -Message "$bhrWorkEmail is marked 'Inactive' in BHR and 'Active' in Entra ID. Blocking sign-in, revoking sessions, changing pw, removing auth methods"
                 # The account is marked "Inactive" in BHR and "Active" in Entra ID, block sign-in, revoke sessions,
                 #change pass, remove auth methods
-                $error.clear()
                 if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Disable Account (Revoke Sessions and Block Sign-In)')) {
                   Write-PSLog -Message "Executing: Revoke-MgUserSignInSession -UserId $bhrWorkEmail" -Severity Debug
                   Revoke-MgUserSignInSession -UserId $bhrWorkEmail
@@ -2998,7 +3603,6 @@ $employees | Sort-Object -Property LastName |
                 }
 
                 Write-PSLog -Message "User $bhrWorkEmail is no longer active in BambooHR, disabling Entra Id account and offboarding user." -Severity Information
-                Add-SignificantChange -Category Disabled -User $bhrWorkEmail -Detail 'Terminated in BambooHR'
                 Write-PSLog -Message "Disabled user: $bhrWorkEmail" -Severity Information
                 Write-PSLog -Message "Logging enterprise app role assignments and user consents for $bhrWorkEmail" -Severity Information
                 $userObjectId = $entraIdUpnObjDetails.Id
@@ -3051,11 +3655,15 @@ $employees | Sort-Object -Property LastName |
                   Write-PSLog -Message 'Get-MgOauth2PermissionGrant not available; skipping user consent logging' -Severity Warning
                 }
                 if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Terminate User Account (Change Password, Update Profile, Convert to Shared Mailbox, Remove Licenses and Groups)')) {
-                  Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params" -Severity Debug
-                  Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params
                   $leaveDateTimeUtc = (Get-Date).ToUniversalTime()
-                  Set-TerminatedUserProfileFields -UserId $bhrWorkEmail -LeaveDateTimeUtc $leaveDateTimeUtc
-                  Get-MgUserMemberOf -UserId $bhrWorkEmail
+
+                  try {
+                    Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params" -Severity Debug
+                    Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params
+                  }
+                  catch {
+                    Write-PSLog -Message "Failed to reset password for $($bhrWorkEmail): $($_.Exception.Message)" -Severity Warning
+                  }
 
                   # TODO: Does not work for on premises synced accounts. Not a problem with Entra Id native.
                   try {
@@ -3063,7 +3671,7 @@ $employees | Sort-Object -Property LastName |
                     Write-PSLog -Message "$bhrWorkEmail LastChanged attribute set from '$upnExtensionAttribute1' to '$bhrlastChanged'." -Severity Information
                   }
                   catch {
-                    $error.Clear()
+                    Write-PSLog -Message "Failed to set extensionAttribute1 for $($bhrWorkEmail): $($_.Exception.Message)" -Severity Warning
                   }
 
                   # Cancel all meetings for the user
@@ -3084,57 +3692,6 @@ $employees | Sort-Object -Property LastName |
                   catch {
                     Write-PSLog -Message "Unable to cancel meetings for $bhrWorkEmail. This requires Calendars.ReadWrite permission. Error: $($_.Exception.Message)" -Severity Warning
                     $errorSummary.Warnings += "Calendar access denied for $bhrWorkEmail - missing Calendars.ReadWrite permission"
-                  }
-
-                  # Set the out of office for the user that they are no longer with the company and to contact the manager
-                  Connect-ExchangeOnlineIfNeeded -TenantId $Script:Config.Azure.TenantId
-
-                  $internalMessage = "I am no longer with the company. Please contact $($entraIdSupervisorEmail) for assistance."
-                  $externalMessage = "My role has changed, please contact $($entraIdSupervisorEmail) for assistance."
-
-                  # set the automatic replies for the user
-                  Write-PSLog -Message "Setting automatic replies for $bhrWorkEmail" -Severity Information
-                  Write-PSLog -Message "Executing: Set-MailboxAutoReplyConfiguration -Identity $bhrWorkEmail -AutoReplyState Enabled -ExternalAudience All" -Severity Debug
-                  Invoke-WithRetry -Operation "Set automatic replies for: $bhrWorkEmail" -ScriptBlock {
-                    Set-MailboxAutoReplyConfiguration -Identity $bhrWorkEmail `
-                      -AutoReplyState Enabled `
-                      -ExternalAudience All `
-                      -InternalMessage $internalMessage `
-                      -ExternalMessage $externalMessage `
-                      -ErrorAction Stop
-                  }
-
-                  # Determine if the user was an owner of any groups and assign ownership to the manager
-                  Write-PSLog -Message "Checking to see if there are groups owned by $bhrWorkEmail" -Severity Information
-                  $groups = Get-MgUserMemberOf -UserId $bhrWorkEmail -ErrorAction SilentlyContinue
-                  if ($groups) {
-                    $groups | ForEach-Object {
-                      $group = $_
-                      if ($group.Owners -contains $bhrWorkEmail) {
-                        Write-PSLog -Message "User $bhrWorkEmail is an owner of group $($group.DisplayName). Reassigning ownership to $($entraIdSupervisorEmail)." -Severity Information
-                      }
-                    }
-                  }
-
-                  # Convert mailbox to shared
-                  Connect-ExchangeOnlineIfNeeded -TenantId $TenantId
-
-                  Write-PSLog -Message "Executing: Set-Mailbox -Identity $bhrWorkEmail -Type Shared" -Severity Debug
-                  Write-PSLog -Message "Converting $bhrWorkEmail to a shared mailbox..." -Severity Debug
-                  Set-Mailbox -Identity $bhrWorkEmail -Type Shared
-                  $null = Wait-ForCondition -Operation "Mailbox conversion to shared for $bhrWorkEmail" -TimeoutSeconds 120 -PollIntervalSeconds 10 -Condition {
-                    (Get-EXOMailbox -Anr $bhrWorkEmail -ErrorAction Stop).RecipientTypeDetails -eq 'SharedMailbox'
-                  }
-
-                  # Give permissions to converted mailbox to previous manager
-                  $mObj = Get-EXOMailbox -Anr $bhrWorkEmail
-                  Write-PSLog "`t$($entraIdSupervisorEmail) being given permissions to $bhrWorkEmail now..." -Severity Information
-                  Write-PSLog "Executing: Add-MailboxPermission -Identity $($mObj.Id) -User $entraIdSupervisorEmail -AccessRights 'FullAccess' -Automapping:$true -InheritanceType All" -Severity Debug
-                  try {
-                    Add-MailboxPermission -Identity $mObj.Id -User $entraIdSupervisorEmail -AccessRights 'FullAccess' -Automapping:$true -InheritanceType All -ErrorAction Stop | Out-Null
-                  }
-                  catch {
-                    Write-PSLog -Message "Failed to add mailbox permission for $bhrWorkEmail to $entraIdSupervisorEmail. Error: $($_.Exception.Message)" -Severity Warning
                   }
 
                   # Grant manager OneDrive access and send the link (30-day access window)
@@ -3205,1295 +3762,974 @@ $employees | Sort-Object -Property LastName |
                     Write-PSLog -Message "Manager email not available for $bhrWorkEmail; skipping OneDrive access grant" -Severity Warning
                   }
 
-                  # Reset/wipe the employees device(s)
-                  Write-PSLog -Message "Removing devices for $bhrWorkEmail..." -Severity Information
-                  $uDevices = Get-MgUserOwnedDevice -UserId $bhrWorkEmail
+                  # Run shared offboarding steps (profile fields, mailbox conversion, license/group/device cleanup, completion stamp)
+                  Invoke-UserOffboarding -UserId $bhrWorkEmail -UserObjectId $entraIdUpnObjDetails.Id -LeaveDateTimeUtc $leaveDateTimeUtc -SupervisorEmail $entraIdSupervisorEmail -DisplayName $bhrDisplayName -PerformanceCache $performanceCache -ErrorSummary $errorSummary
 
-                  Write-Output "User's devices"
-                  $uDevices | Format-Table
+                  Add-SignificantChange -Category Disabled -User $bhrWorkEmail -Detail 'Terminated in BambooHR'
+                  Write-PSLog -Message "Account $bhrWorkEmail marked as inactive in BambooHR. Entra ID account has been disabled, sessions revoked and MFA removed." -Severity Information
+                }
+              }
+              elseif ($bhrAccountEnabled -eq $false -and $bhrEmploymentStatus.Trim() -eq 'Terminated' -and $entraIdStatus -eq $false ) {
+                # Account is already disabled. Check whether the full offboarding process
+                # actually completed by inspecting profile fields that get overwritten during
+                # offboarding. If CompanyName does not start with a date stamp (MM/DD/YY),
+                # Department/JobTitle/OfficeLocation are not cleared, or phone
+                # fields still contain values, the offboarding was interrupted or never ran —
+                # re-run it.
+                $offboardingComplete = Test-IsOffboardingComplete -CompanyName $entraIdCompanyName -Department $entraIdDepartment -JobTitle $entraIdJobTitle -OfficeLocation $entraIdOfficeLocation -WorkPhone $entraIdWorkPhone -MobilePhone $entraIdMobilePhone
 
-                  $uDevices | ForEach-Object {
-                    $deviceObject = $_
-                    Write-PSLog -Message "Removing $bhrWorkEmail from $($deviceObject.Id) $($deviceObject.DisplayName)..." -Severity Debug
-                    # Invoke-MgDeviceManagementManagedDeviceWindowsAutopilotReset -ManagedDeviceId $_.Id
-                    Remove-MgDeviceRegisteredOwnerByRef -DeviceId $deviceObject.Id -DirectoryObjectId $userObjectId
+                if (-not $offboardingComplete) {
+                  Write-PSLog -Message "$bhrWorkEmail is disabled but offboarding appears incomplete (Company='$entraIdCompanyName', Dept='$entraIdDepartment', Title='$entraIdJobTitle', Office='$entraIdOfficeLocation', WorkPhone='$entraIdWorkPhone', MobilePhone='$entraIdMobilePhone'). Re-running offboarding." -Severity Warning
+                  # Re-run the same offboarding block that fires when the account transitions
+                  # from enabled to disabled. We set $entraIdStatus to $true so the primary
+                  # termination condition above will match on the next pass, but since we are
+                  # already past that branch we duplicate the key termination actions here.
 
-                    $deviceDetails = Get-MgDevice -DeviceId $deviceObject.Id
-                    $existingNotes = $deviceDetails.Notes
-                    $timestamp = Get-Date -Format 'yyyy-MM-dd'
-                    $updatedNotes = "$existingNotes | Owner $bhrWorkEmail removed on $timestamp"
-                    Update-MgDevice -DeviceId $deviceObject.Id -BodyParameter @{ Notes = $updatedNotes }
+                  if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Complete missed offboarding (Update Profile, Convert to Shared Mailbox, Remove Licenses and Groups)')) {
+                    $leaveDateTimeUtc = (Get-Date).ToUniversalTime()
+                    Invoke-UserOffboarding -UserId $bhrWorkEmail -UserObjectId $entraIdUpnObjDetails.Id -LeaveDateTimeUtc $leaveDateTimeUtc -SupervisorEmail $entraIdSupervisorEmail -DisplayName $bhrDisplayName -PerformanceCache $performanceCache -ErrorSummary $errorSummary
+                    Add-SignificantChange -Category Disabled -User $bhrWorkEmail -Detail 'Offboarding completed (was incomplete)'
+                    Write-PSLog -Message "Completed missed offboarding for $bhrWorkEmail" -Severity Information
+                  }
+                }
+                else {
+                  Write-PSLog -Message "$bhrWorkEmail is disabled and offboarding is complete. Nothing to do." -Severity Debug
+                }
+              }
+              else {
+                Write-PSLog 'User account active, looking for user updates.' -Severity Debug
+
+                if ($bhrAccountEnabled -eq $true -and $entraIdstatus -eq $false) {
+                  # The account is marked "Active" in BHR and "Inactive" in Entra ID, enable the Entra ID account
+                  Write-PSLog -Message "$bhrWorkEmail is marked Active in BHR and Inactive in Entra ID" -Severity Debug
+
+                  #Change to a random pass
+                  $newPas = (Get-NewPassword)
+                  $params = @{
+                    PasswordProfile = @{
+                      ForceChangePasswordNextSignIn = $true
+                      Password                      = $newPas
+                    }
                   }
 
-                  Write-PSLog -Message "Evaluating Intune managed devices and Autopilot registrations for $bhrWorkEmail" -Severity Information
-                  $managedDeviceCommand = Get-Command Get-MgUserManagedDevice -ErrorAction SilentlyContinue
-                  if ($managedDeviceCommand) {
-                    try {
-                      $managedDevices = Get-MgUserManagedDevice -UserId $userObjectId -All -ErrorAction Stop
-                      foreach ($managedDevice in $managedDevices) {
-                        Write-PSLog -Message "Intune managed device should be reset: $($managedDevice.DeviceName) ($($managedDevice.Id))" -Severity Warning
-                        $updateManagedDeviceCommand = Get-Command Update-MgDeviceManagementManagedDevice -ErrorAction SilentlyContinue
-                        if ($updateManagedDeviceCommand) {
-                          try {
-                            $updateBody = @{ userId = $null; userPrincipalName = $null }
-                            Update-MgDeviceManagementManagedDevice -ManagedDeviceId $managedDevice.Id -BodyParameter $updateBody -ErrorAction Stop
-                            Write-PSLog -Message "Cleared Intune primary user for device $($managedDevice.DeviceName)" -Severity Information
-                          }
-                          catch {
-                            Write-PSLog -Message "Failed to clear Intune primary user for $($managedDevice.DeviceName): $($_.Exception.Message)" -Severity Warning
-                          }
-                        }
-                        else {
-                          Write-PSLog -Message 'Update-MgDeviceManagementManagedDevice not available; cannot clear Intune primary user' -Severity Warning
-                        }
-                      }
+                  if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Re-enable User Account (Reset Password and Convert from Shared Mailbox)')) {
+                    Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -AccountEnabled:$bhrAccountEnabled" -Severity Debug
+                    Invoke-WithRetry -Operation "Re-enable user account: $bhrWorkEmail" -ScriptBlock {
+                      Update-MgUser -UserId $bhrWorkEmail -AccountEnabled:$bhrAccountEnabled
                     }
-                    catch {
-                      Write-PSLog -Message "Failed to query Intune managed devices for $($bhrWorkEmail): $($_.Exception.Message)" -Severity Warning
-                    }
-                  }
-                  else {
-                    Write-PSLog -Message 'Get-MgUserManagedDevice not available; skipping Intune managed device processing' -Severity Warning
-                  }
-
-                  $autopilotCommand = Get-Command Get-MgDeviceManagementWindowsAutopilotDeviceIdentity -ErrorAction SilentlyContinue
-                  if ($autopilotCommand) {
-                    try {
-                      $autopilotDevices = Get-CachedAutopilotDevicesForUser -Cache $performanceCache -UserPrincipalName $bhrWorkEmail
-                      foreach ($autopilotDevice in $autopilotDevices) {
-                        Write-PSLog -Message "Autopilot device should be reset: $($autopilotDevice.DisplayName) ($($autopilotDevice.Id))" -Severity Warning
-                        $updateAutopilotCommand = Get-Command Update-MgDeviceManagementWindowsAutopilotDeviceIdentity -ErrorAction SilentlyContinue
-                        if ($updateAutopilotCommand) {
-                          try {
-                            $autopilotBody = @{ assignedUserPrincipalName = $null; userPrincipalName = $null }
-                            Update-MgDeviceManagementWindowsAutopilotDeviceIdentity -WindowsAutopilotDeviceIdentityId $autopilotDevice.Id -BodyParameter $autopilotBody -ErrorAction Stop
-                            Write-PSLog -Message "Cleared Autopilot assigned user for $($autopilotDevice.DisplayName)" -Severity Information
-                          }
-                          catch {
-                            Write-PSLog -Message "Failed to clear Autopilot assigned user for $($autopilotDevice.DisplayName): $($_.Exception.Message)" -Severity Warning
-                          }
-                        }
-                        else {
-                          Write-PSLog -Message 'Update-MgDeviceManagementWindowsAutopilotDeviceIdentity not available; cannot clear Autopilot assigned user' -Severity Warning
-                        }
-                      }
-                    }
-                    catch {
-                      Write-PSLog -Message "Failed to query Autopilot devices for $($bhrWorkEmail): $($_.Exception.Message)" -Severity Warning
-                    }
-                    else {
-                      Write-PSLog -Message 'Get-MgDeviceManagementWindowsAutopilotDeviceIdentity not available; skipping Autopilot processing' -Severity Warning
+                    Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params" -Severity Debug
+                    Invoke-WithRetry -Operation "Update re-enabled user attributes: $bhrWorkEmail" -ScriptBlock {
+                      Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params
                     }
 
-                    # Remove Licenses
-                    Write-PSLog -Message 'Removing licenses...' -Severity Information
-
-                    Write-PSLog -Message "Executing: Get-MgUserLicenseDetail -UserId $bhrWorkEmail | ForEach-Object { Set-MgUserLicense -UserId $bhrWorkEmail -RemoveLicenses $_.SkuId -AddLicenses @{} }" -Severity Debug
-                    Get-MgUserLicenseDetail -UserId $bhrWorkEmail | ForEach-Object { Set-MgUserLicense -UserId $bhrWorkEmail -RemoveLicenses $_.SkuId -AddLicenses @{} }
-
-                    # Transfer group ownership to manager (if any)
-                    Write-PSLog -Message "Transferring group ownership for $bhrWorkEmail to $entraIdSupervisorEmail" -Severity Information
-                    $managerObj = Get-MgUser -UserId $entraIdSupervisorEmail -ErrorAction SilentlyContinue
-                    if ($managerObj) {
-                      $ownedGroups = Get-MgUserOwnedObject -UserId $bhrWorkEmail -All | Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.group' }
-                      foreach ($group in $ownedGroups) {
-                        $existingOwners = Get-MgGroupOwner -GroupId $group.Id -All | ForEach-Object { $_.Id }
-                        if ($existingOwners -notcontains $managerObj.Id) {
-                          Write-PSLog -Message "Adding manager as owner for group $($group.Id)" -Severity Debug
-                          New-MgGroupOwnerByRef -GroupId $group.Id -BodyParameter @{ '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$($managerObj.Id)" }
-                        }
-                        if ($existingOwners -contains $entraIdUpnObjDetails.Id) {
-                          $removeOwnerCommand = Get-Command Remove-MgGroupOwnerByRef -ErrorAction SilentlyContinue
-                          if ($removeOwnerCommand) {
-                            try {
-                              Write-PSLog -Message "Removing $bhrWorkEmail as owner for group $($group.Id)" -Severity Debug
-                              Remove-MgGroupOwnerByRef -GroupId $group.Id -DirectoryObjectId $entraIdUpnObjDetails.Id -ErrorAction Stop
-                            }
-                            catch {
-                              Write-PSLog -Message "Failed to remove $bhrWorkEmail as owner for group $($group.Id): $($_.Exception.Message)" -Severity Warning
-                            }
-                          }
-                          else {
-                            Write-PSLog -Message "Remove-MgGroupOwnerByRef not available; cannot remove $bhrWorkEmail as owner for group $($group.Id)" -Severity Warning
-                          }
-                        }
-                      }
-                    }
-                    else {
-                      Write-PSLog -Message "Manager $entraIdSupervisorEmail not found; skipping ownership transfer." -Severity Warning
-                    }
-
-                    # Remove groups
-                    Write-PSLog -Message 'Removing group memberships' -Severity Debug
-                    Write-PSLog -Message "Executing: Get-MgUserMemberOf -UserId $bhrWorkEmail | ForEach-Object { Remove-MgGroupMemberByRef -GroupId $_.id -DirectoryObjectId $entraIdUpnObjDetails.id } " -Severity Debug
-
-                    Get-MgUserMemberOf -UserId $bhrWorkEmail | ForEach-Object {
-                      $groupMembership = $_
-                      try {
-                        Invoke-WithRetry -Operation "Remove group membership $($groupMembership.Id) for: $bhrWorkEmail" -ScriptBlock {
-                          Remove-MgGroupMemberByRef -GroupId $groupMembership.id -DirectoryObjectId $entraIdUpnObjDetails.id -ErrorAction Stop
-                        }
-                      }
-                      catch {
-                        Write-PSLog -Message "Failed to remove $bhrWorkEmail from Entra group $($groupMembership.Id): $($_.Exception.Message)" -Severity Warning
-                      }
-                    }
-
-                    Write-PSLog -Message "Removing distribution list memberships for $bhrWorkEmail" -Severity Information
+                    # Convert mailbox from shared to user mailbox
                     Connect-ExchangeOnlineIfNeeded -TenantId $Script:Config.Azure.TenantId
+
+                    Write-PSLog -Message "Executing: Set-Mailbox -Identity $bhrWorkEmail -Type Regular" -Severity Debug
+                    Write-PSLog -Message "Converting $bhrWorkEmail to a user mailbox..." -Severity Debug
                     try {
-                      $distributionGroups = Get-CachedDistributionGroups -Cache $performanceCache
-                      foreach ($distributionGroup in $distributionGroups) {
-                        try {
-                          $members = Get-DistributionGroupMember -Identity $distributionGroup.Identity -ResultSize Unlimited -ErrorAction SilentlyContinue |
-                            Where-Object { $_.PrimarySmtpAddress -eq $bhrWorkEmail }
-                            if ($members) {
-                              Remove-DistributionGroupMember -Identity $distributionGroup.Identity -Member $bhrWorkEmail -BypassSecurityGroupManagerCheck -Confirm:$false -ErrorAction Stop
-                              Write-PSLog -Message "Removed $bhrWorkEmail from distribution group $($distributionGroup.DisplayName)" -Severity Information
+                      Set-Mailbox -Identity $bhrWorkEmail -Type Regular -ErrorAction Stop
+                    }
+                    catch {
+                      Write-PSLog -Message "Failed to convert $bhrWorkEmail to a user mailbox. Error: $($_.Exception.Message)" -Severity Warning
+                    }
+
+                    $null = Wait-ForCondition -Operation "Mailbox conversion to regular for $bhrWorkEmail" -TimeoutSeconds 120 -PollIntervalSeconds 10 -Condition {
+                      (Get-EXOMailbox -Anr $bhrWorkEmail -ErrorAction Stop).RecipientTypeDetails -eq 'UserMailbox'
+                    }
+
+                    # Remove permissions to converted mailbox to previous manager
+                    $mObj = Get-EXOMailbox -Anr $bhrWorkEmail
+                    Write-PSLog "`tShared permissions being revoked for $bhrWorkEmail..." -Severity Information
+                    Write-PSLog "Executing: Remove-MailboxPermission -Identity $($mObj.Id) -ResetDefault" -Severity Debug
+                    try {
+                      Remove-MailboxPermission -Identity $mObj.Id -ResetDefault -ErrorAction Stop | Out-Null
+                    }
+                    catch {
+                      Write-PSLog -Message "Failed to remove mailbox permissions for $bhrWorkEmail. Error: $($_.Exception.Message)" -Severity Warning
+                    }
+
+                    # Remove automatic replies when the account is reactivated
+                    Write-PSLog -Message "Removing automatic replies for $bhrWorkEmail" -Severity Information
+                    Write-PSLog -Message "Executing: Set-MailboxAutoReplyConfiguration -Identity $bhrWorkEmail -AutoReplyState Disabled" -Severity Debug
+                    try {
+                      Invoke-WithRetry -Operation "Disable automatic replies for: $bhrWorkEmail" -ScriptBlock {
+                        Set-MailboxAutoReplyConfiguration -Identity $bhrWorkEmail `
+                          -AutoReplyState Disabled `
+                          -InternalMessage '' `
+                          -ExternalMessage '' `
+                          -ErrorAction Stop
+                      }
+                    }
+                    catch {
+                      Write-PSLog -Message "Failed to disable automatic replies for $bhrWorkEmail. Error: $($_.Exception.Message)" -Severity Warning
+                    }
+
+                    $params = @{
+                      Message         = @{
+                        Subject      = "User Account Re-enabled: $bhrdisplayName"
+                        Body         = @{
+                          ContentType = 'html'
+                          Content     = "<br/>One of your direct report's user account has been re-enabled. Please securely share this information with them so that they can login.<br/> User name: $bhrWorkEmail <br/> Temporary Password: $newPas.`n<br/><br/> $($Script:Config.Email.EmailSignature)"
+                        }
+                        ToRecipients = @(
+                          @{
+                            EmailAddress = @{
+                              Address = $bhrSupervisorEmail
                             }
                           }
-                          catch {
-                            Write-PSLog -Message "Failed to remove $bhrWorkEmail from distribution group $($distributionGroup.DisplayName): $($_.Exception.Message)" -Severity Warning
+
+                          @{
+                            EmailAddress = @{
+                              Address = $NotificationEmailAddress
+                            }
                           }
+                          @{
+                            EmailAddress = @{
+                              Address = $AdminEmailAddress
+                            }
+                          }
+                        )
+                      }
+                      SaveToSentItems = 'True'
+                    }
+
+                    Invoke-WithRetry -Operation 'Send re-enable notification email' -ScriptBlock {
+                      Send-MgUserMail -BodyParameter $params -UserId $Script:Config.Email.AdminEmailAddress -Verbose
+                    }
+
+                    New-AdaptiveCard {
+                      New-AdaptiveTextBlock -Text "User Account $bhrWorkEmail Re-enabled" -HorizontalAlignment Center -Wrap -Weight Large
+                      New-AdaptiveTextBlock -Text "User name: $bhrWorkEmail" -Wrap
+                    } -Uri $Script:Config.Features.TeamsCardUri -Speak "User Account Re-enabled: $bhrdisplayName"
+
+
+                    Write-PSLog -Message " Account $bhrWorkEmail marked as Active in BambooHR but Inactive in Entra ID. Enabled Entra ID account for sign-in." -Severity Information
+                  }
+                }
+                else {
+                  Write-PSLog -Message 'Account is in the correct state: Enabled in both BHR and Entra ID' -Severity Debug
+                }
+
+                # Checking JobTitle if correctly set, if not, configure the JobTitle as set in BambooHR
+                if ($entraIdJobTitle.Trim() -ne $bhrJobTitle.Trim()) {
+                  Write-PSLog -Message "Entra ID Job Title $entraIdJobTitle does not match BHR Job Title $bhrJobTitle. Updating title." -Severity Debug
+
+                  if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
+
+                    Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -JobTitle '$bhrJobTitle'" -Severity Debug
+                    try {
+                      Invoke-WithRetry -Operation "Update JobTitle for: $bhrWorkEmail" -ScriptBlock {
+                        if ([string]::IsNullOrWhiteSpace($bhrJobTitle) -eq $false) {
+                          Update-MgUser -UserId $bhrWorkEmail -JobTitle $bhrJobTitle
+                        }
+                        else {
+                          Update-MgUser -UserId $bhrWorkEmail -JobTitle $null
                         }
                       }
-                      catch {
-                        Write-PSLog -Message "Failed to enumerate distribution groups: $($_.Exception.Message)" -Severity Warning
+                      Write-PSLog -Message "JobTitle for $bhrWorkEmail in Entra ID set from '$entraIdjobTitle' to '$bhrjobTitle'." -Severity Information
+                    }
+                    catch {
+                      Write-PSLog -Message "Error changing Job Title of $bhrWorkEmail.`nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
+
+                      # Track error for summary report
+                      $errorSummary.TotalErrors++
+                      $errorType = 'AttributeUpdate_JobTitle'
+                      if (-not $errorSummary.ErrorsByType.ContainsKey($errorType)) {
+                        $errorSummary.ErrorsByType[$errorType] = 0
+                      }
+                      $errorSummary.ErrorsByType[$errorType]++
+                      if (-not $errorSummary.ErrorsByUser.ContainsKey($bhrWorkEmail)) {
+                        $errorSummary.ErrorsByUser[$bhrWorkEmail] = 'JobTitle update failed'
                       }
 
-                      Write-PSLog -Message "Removing mailbox delegate permissions for $bhrWorkEmail" -Severity Information
+                    }
+                  }
+                }
+
+                # Checking department if correctly set, if not, configure the Department as set in BambooHR
+                if ($entraIdDepartment.Trim() -ne $bhrDepartment.Trim() -and -not [string]::IsNullOrWhiteSpace($bhrDepartment)) {
+                  Write-PSLog -Message "Entra ID department '$entraIdDepartment' does not match BambooHR department '$($bhrDepartment.Trim())'" -Severity Debug
+                  if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
+                    Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -Department $bhrDepartment" -Severity Debug
+                    try {
+                      Invoke-WithRetry -Operation "Update Department for: $bhrWorkEmail" -ScriptBlock {
+                        Update-MgUser -UserId $bhrWorkEmail -Department "$bhrDepartment"
+                      }
+                      Write-PSLog -Message "Department for $bhrWorkEmail in Entra ID set from '$entraIdDepartment' to '$bhrDepartment'." -Severity Information
+                    }
+                    catch {
+                      Write-PSLog -Message "Error changing Department of $bhrWorkEmail `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
+
+                      # Track error for summary report
+                      $errorSummary.TotalErrors++
+                      $errorType = 'AttributeUpdate_Department'
+                      if (-not $errorSummary.ErrorsByType.ContainsKey($errorType)) {
+                        $errorSummary.ErrorsByType[$errorType] = 0
+                      }
+                      $errorSummary.ErrorsByType[$errorType]++
+                      if (-not $errorSummary.ErrorsByUser.ContainsKey($bhrWorkEmail)) {
+                        $errorSummary.ErrorsByUser[$bhrWorkEmail] = 'Department update failed'
+                      }
+
+                    }
+                  }
+                }
+                else {
+                  Write-PSLog "Entra ID and BHR department already matches $entraIdDepartment" -Severity Debug
+                }
+
+                # Checking the manager if correctly set, and removing it when BambooHR clears the relationship.
+                $shouldRemoveManager = [string]::IsNullOrWhiteSpace($bhrSupervisorEmail) -and -not [string]::IsNullOrWhiteSpace($entraIdSupervisorEmail)
+                $shouldSetManager = -not [string]::IsNullOrWhiteSpace($bhrSupervisorEmail) -and $entraIdSupervisorEmail -ne $bhrSupervisorEmail
+                if ($shouldRemoveManager) {
+                  Write-PSLog -Message "BambooHR manager is empty for $bhrWorkEmail; removing stale Entra ID manager '$entraIdSupervisorEmail'." -Severity Debug
+                  if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Remove User Manager')) {
+                    try {
+                      Invoke-WithRetry -Operation "Remove manager for: $bhrWorkEmail" -ScriptBlock {
+                        Remove-MgUserManagerByRef -UserId $bhrWorkEmail -ErrorAction Stop
+                      }
+                      Write-PSLog -Message "Removed manager '$entraIdSupervisorEmail' from $bhrWorkEmail because BambooHR no longer has a supervisor assigned." -Severity Information
+                      Add-SignificantChange -Category ManagerChanged -User $bhrWorkEmail -Detail "$entraIdSupervisorEmail -> <none>"
+                    }
+                    catch {
+                      Write-PSLog -Message "Error removing manager of $bhrWorkEmail. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
+                      $errorSummary.TotalErrors++
+                      $errorType = 'ManagerRemoval'
+                      if (-not $errorSummary.ErrorsByType.ContainsKey($errorType)) {
+                        $errorSummary.ErrorsByType[$errorType] = 0
+                      }
+                      $errorSummary.ErrorsByType[$errorType]++
+                      $errorSummary.ErrorsByUser[$bhrWorkEmail] = "Failed to remove manager: $($_.Exception.Message)"
+                    }
+                  }
+                }
+                elseif ($shouldSetManager) {
+                  Write-PSLog -Message "Manager in Entra ID '$entraIdSupervisorEmail' does not match BHR manager '$bhrSupervisorEmail'" -Severity Debug
+
+                  $managerUser = Get-ValidManagerUser -UserPrincipalName $bhrSupervisorEmail -Cache $performanceCache -TargetUser $bhrWorkEmail
+
+                  if ($managerUser) {
+                    $newManager = @{
+                      '@odata.id' = "https://graph.microsoft.com/v1.0/users/$($managerUser.Id)"
+                    }
+
+                    if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
+                      Write-PSLog -Message "Executing: Set-MgUserManagerByRef -UserId $bhrWorkEmail -BodyParameter $newManager" -Severity Debug
                       try {
-                        $mailboxes = Get-CachedMailboxes -Cache $performanceCache
-                        foreach ($mailbox in $mailboxes) {
-                          try {
-                            $fullAccessPermissions = Get-EXOMailboxPermission -Identity $mailbox.Identity -User $bhrWorkEmail -ErrorAction SilentlyContinue |
-                              Where-Object { $_.AccessRights -contains 'FullAccess' }
-                              if ($fullAccessPermissions) {
-                                Remove-MailboxPermission -Identity $mailbox.Identity -User $bhrWorkEmail -AccessRights 'FullAccess' -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-                                Write-PSLog -Message "Removed FullAccess delegate from mailbox $($mailbox.Identity)" -Severity Information
-                              }
-                            }
-                            catch {
-                              Write-PSLog -Message "Failed to remove FullAccess delegate from mailbox $($mailbox.Identity): $($_.Exception.Message)" -Severity Warning
-                            }
+                        Invoke-WithRetry -Operation "Set manager for: $bhrWorkEmail" -ScriptBlock {
+                          Set-MgUserManagerByRef -UserId $bhrWorkEmail -BodyParameter $newManager
+                        }
+                        Write-PSLog -Message "Manager of $bhrWorkEmail in Entra ID '$entraIdsupervisorEmail' and in BambooHR '$bhrsupervisorEmail'. Setting new manager to the Azure User Object." -Severity Information
+                        Add-SignificantChange -Category ManagerChanged -User $bhrWorkEmail -Detail "$entraIdSupervisorEmail -> $bhrSupervisorEmail"
+                      }
+                      catch {
+                        Write-PSLog -Message "Error changing manager of $bhrWorkEmail. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
+
+                        # Track error for summary report
+                        $errorSummary.TotalErrors++
+                        $errorType = 'ManagerAssignment'
+                        if (-not $errorSummary.ErrorsByType.ContainsKey($errorType)) {
+                          $errorSummary.ErrorsByType[$errorType] = 0
+                        }
+                        $errorSummary.ErrorsByType[$errorType]++
+                        $errorSummary.ErrorsByUser[$bhrWorkEmail] = "Failed to set manager: $($_.Exception.Message)"
+
+                      }
+                    }
+                  }
+                }
+                else {
+                  Write-PSLog -Message "Supervisor email already correct $entraIdSuperVisorEmail" -Severity Debug
+                }
+
+                # Check and set the Office Location
+                if ($entraIdOfficeLocation.Trim() -ne $bhrOfficeLocation.Trim()) {
+                  Write-PSLog -Message "Entra ID office location '$entraIdOfficeLocation' does not match BHR hire data '$bhrOfficeLocation'" -Severity Debug
+                  if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
+                    Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -OfficeLocation $($bhrOfficeLocation.Trim())" -Severity Debug
+                    try {
+                      Invoke-WithRetry -Operation "Update OfficeLocation for: $bhrWorkEmail" -ScriptBlock {
+                        Update-MgUser -UserId $bhrWorkEmail -OfficeLocation $bhrOfficeLocation.Trim()
+                      }
+                      Write-PSLog -Message "Office location of $bhrWorkEmail in Entra ID changed from '$entraIdOfficeLocation' to '$bhrOfficeLocation'." -Severity Information
+                    }
+                    catch {
+                      Write-PSLog -Message "Error changing employee office location. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
+                    }
+                  }
+                }
+                else {
+                  Write-PSLog -Message "Office Location correct $entraIdOfficeLocation" -Severity Debug
+                }
+
+                # Check and set the Employee Hire Date
+                if ($entraIdHireDate -ne $normalizedBhrHireDate) {
+                  Write-PSLog -Message "Entra ID hire date '$entraIdHireDate' does not match BHR hire data '$normalizedBhrHireDate'" -Severity Debug
+                  if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
+                    Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -EmployeeHireDate $normalizedBhrHireDate" -Severity Debug
+                    try {
+                      Invoke-WithRetry -Operation "Update EmployeeHireDate for: $bhrWorkEmail" -ScriptBlock {
+                        Update-MgUser -UserId $bhrWorkEmail -EmployeeHireDate $normalizedBhrHireDate
+                      }
+                      Write-PSLog -Message "Hire date of $bhrWorkEmail changed from '$entraIdHireDate' in Entra ID and BHR '$normalizedBhrHireDate'." -Severity Information
+                    }
+                    catch {
+                      Write-PSLog -Message "Error changing $bhrWorkEmail hire date. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
+                    }
+                  }
+                }
+                else {
+                  Write-PSLog -Message "Hire date already correct $entraIdHireDate" -Severity Debug
+                }
+
+                # Check and set the work phone ignoring formatting
+                # Treat empty/whitespace and '0' as equivalent (both mean "no phone")
+                $normalizedBhrWork = Get-WorkPhoneComparisonValue -PhoneNumber $bhrWorkPhone
+                $normalizedEntraWork = Get-WorkPhoneComparisonValue -PhoneNumber $entraIdWorkPhone
+                if ($normalizedEntraWork -ne $normalizedBhrWork) {
+
+                  Write-PSLog -Message "Entra ID work phone '$entraIdWorkPhone' does not match BHR '$bhrWorkPhone'" -Severity Debug
+                  if ([string]::IsNullOrWhiteSpace($bhrWorkPhone)) {
+                    $bhrWorkPhone = '0'
+                  }
+
+                  if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
+                    $workPhoneUpdated = $false
+                    if ([string]::IsNullOrWhiteSpace($bhrWorkPhone)) {
+                      $bhrWorkPhone = '0'
+                      Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BusinessPhones '$bhrWorkPhone'" -Severity Debug
+                      try {
+                        Invoke-WithRetry -Operation "Update BusinessPhones for: $bhrWorkEmail" -ScriptBlock {
+                          Update-MgUser -UserId $bhrWorkEmail -BusinessPhones $bhrWorkPhone -ErrorAction Stop | Out-Null
+                        }
+                        $workPhoneUpdated = $true
+                      }
+                      catch {
+                        Write-PSLog -Message "Error changing work phone for $bhrWorkEmail. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
+                      }
+                    }
+                    else {
+                      [string]$bhrWorkPhone = ConvertTo-PhoneNumber $bhrWorkPhone
+                      Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BusinessPhones $bhrWorkPhone" -Severity Debug
+                      try {
+                        Invoke-WithRetry -Operation "Update BusinessPhones for: $bhrWorkEmail" -ScriptBlock {
+                          Update-MgUser -UserId $bhrWorkEmail -BusinessPhones $bhrWorkPhone -ErrorAction Stop | Out-Null
+                        }
+                        $workPhoneUpdated = $true
+                      }
+                      catch {
+                        Write-PSLog -Message "Error changing work phone for $bhrWorkEmail. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
+                      }
+                    }
+
+                    if ($workPhoneUpdated) {
+                      Write-PSLog -Message "Work Phone for '$bhrWorkEmail' changed from '$entraIdWorkPhone' to '$bhrWorkPhone'" -Severity Information
+                    }
+                  }
+                }
+                else {
+                  Write-PSLog -Message "Work phone correct $entraIdWorkEmail $entraIdWorkPhone" -Severity Debug
+                }
+
+                if ($Script:Config.Features.EnableMobilePhoneSync) {
+                  [string]$entraIdMobilePhone = $entraIdMobilePhone -replace '[^0-9]', ''
+                  [string]$bhrMobilePhone = $bhrMobilePhone -replace '[^0-9]', ''
+                  # Check and set the mobile phone ignoring formatting
+                  if ($entraIdMobilePhone -ne $bhrMobilePhone) {
+
+                    Write-PSLog -Message "Entra ID mobile phone '$entraIdMobilePhone' does not match BHR '$bhrMobilePhone'" -Severity Debug
+
+                    if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
+                      $mobilePhoneUpdated = $false
+                      if ([string]::IsNullOrWhiteSpace($bhrMobilePhone)) {
+                        $bhrMobilePhone = '0'
+                        Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -MobilePhone '$bhrMobilePhone'" -Severity Debug
+                        try {
+                          Invoke-WithRetry -Operation "Update MobilePhone for: $bhrWorkEmail" -ScriptBlock {
+                            Update-MgUser -UserId $bhrWorkEmail -MobilePhone $bhrMobilePhone -ErrorAction Stop
                           }
+                          $mobilePhoneUpdated = $true
                         }
                         catch {
-                          Write-PSLog -Message "Failed to enumerate mailboxes for delegate cleanup: $($_.Exception.Message)" -Severity Warning
+                          Write-PSLog -Message "Error changing $bhrWorkEmail mobile phone. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
                         }
-
+                      }
+                      else {
+                        $bhrMobilePhone = ($bhrMobilePhone -replace '[^0-9]', '' ) -replace '^1', ''
+                        $bhrMobilePhone = '{0:(###) ###-####}' -f [int64]$bhrMobilePhone
+                        Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -MobilePhone $bhrMobilePhone" -Severity Debug
                         try {
-                          $sendAsPermissions = Get-EXORecipientPermission -Trustee $bhrWorkEmail -ResultSize Unlimited -ErrorAction SilentlyContinue |
-                            Where-Object { $_.AccessRights -contains 'SendAs' }
-                            foreach ($sendAsPermission in $sendAsPermissions) {
-                              try {
-                                Remove-RecipientPermission -Identity $sendAsPermission.Identity -Trustee $bhrWorkEmail -AccessRights 'SendAs' -Confirm:$false -ErrorAction Stop | Out-Null
-                                Write-PSLog -Message "Removed SendAs delegate from mailbox $($sendAsPermission.Identity)" -Severity Information
-                              }
-                              catch {
-                                Write-PSLog -Message "Failed to remove SendAs delegate from mailbox $($sendAsPermission.Identity): $($_.Exception.Message)" -Severity Warning
-                              }
-                            }
+                          Invoke-WithRetry -Operation "Update MobilePhone for: $bhrWorkEmail" -ScriptBlock {
+                            Update-MgUser -UserId $bhrWorkEmail -MobilePhone $bhrMobilePhone -ErrorAction Stop
                           }
-                          catch {
-                            Write-PSLog -Message "Failed to enumerate SendAs permissions for $($bhrWorkEmail): $($_.Exception.Message)" -Severity Warning
-                          }
-                          $authMethods = @(
-                            Invoke-WithRetry -Operation "Get authentication methods for: $bhrWorkEmail" -ScriptBlock {
-                              Get-MgUserAuthenticationMethod -UserId $bhrWorkEmail -ErrorAction Stop
-                            }
-                          )
-
-                          # Loop through and remove each authentication method
-                          $error.Clear()
-
-                          foreach ($authMethod in $authMethods) {
-                            $methodData = $authMethod.AdditionalProperties.Values
-
-                            if ($methodData -like '*phoneAuthenticationMethod*') { Remove-MgUserAuthenticationPhoneMethod -UserId $bhrWorkEmail -PhoneAuthenticationMethodId $authMethod.id; Write-PSLog -Message "Removed phone auth method for $bhrWorkEmail." -Severity Warning }
-                            if ($methodData -like '*microsoftAuthenticatorAuthenticationMethod*') { Remove-MgUserAuthenticationMicrosoftAuthenticatorMethod -UserId $bhrWorkEmail -MicrosoftAuthenticatorAuthenticationMethodId $authMethod.id; Write-PSLog -Message "Removed auth app method for $bhrWorkEmail." -Severity Warning }
-                            if ($methodData -like '*fido2AuthenticationMethod*') { Remove-MgUserAuthenticationFido2Method -UserId $bhrWorkEmail -Fido2AuthenticationMethodId $authMethod.id; Write-PSLog -Message "Removed passkey (FIDO2) for $bhrWorkEmail." -Severity Warning }
-                            if ($methodData -like '*windowsHelloForBusinessAuthenticationMethod*') { Remove-MgUserAuthenticationWindowsHelloForBusinessMethod -UserId $bhrWorkEmail -WindowsHelloForBusinessAuthenticationMethodId $authMethod.id; Write-PSLog -Message "Removed Windows Hello for Business method for $bhrWorkEmail." -Severity Warning }
-                          }
-
-                          # Remove Manager
-                          Write-PSLog -Message 'Removing Manager...' -Severity Debug
-                          Write-PSLog -Message "Executing: Remove-MgUserManagerByRef -UserId $bhrWorkEmail" -Severity Debug
-                          Remove-MgUserManagerByRef -UserId $bhrWorkEmail
-
-                          Write-PSLog -Message "Executing: Update-MgUser -EmployeeId 'LVR' -UserId $bhrWorkEmail" -Severity Debug
-                          Invoke-WithRetry -Operation "Mark user as on leave: $bhrWorkEmail" -ScriptBlock {
-                            Update-MgUser -EmployeeId 'LVR' -UserId $bhrWorkEmail
-                          }
-                          Write-PSLog -Message 'Updating shared mailbox settings...' -Severity Information
-
-                          if ($error.Count -ne 0) {
-                            $error | ForEach-Object {
-                              $err_Exception = $_.Exception
-                              $err_Target = $_.TargetObject
-                              $errCategory = $_.CategoryInfo
-                              Write-PSLog " Could not remove authentication details. `n Exception: $err_Exception `n Target Object: $err_Target `n Error Category: $errCategory " -Severity Error
-                            }
-                          }
-                          else {
-                            # CompanyName is updated last — it acts as the completion marker.
-                            # The incomplete-offboarding detector checks for this date stamp to
-                            # decide whether offboarding finished successfully.
-                            Write-PSLog -Message "Setting CompanyName completion stamp for $bhrWorkEmail" -Severity Information
-                            Update-MgUser -UserId $bhrWorkEmail -CompanyName (Get-OffboardingCompletionMarker -LeaveDateTimeUtc $leaveDateTimeUtc)
-
-                            Write-PSLog -Message " Account $bhrWorkEmail marked as inactive in BambooHR Entra ID account has been disabled, sessions revoked and removed MFA." -Severity Information
-                            $error.Clear()
-                          }
+                          $mobilePhoneUpdated = $true
                         }
-                      }
-                      elseif ($bhrAccountEnabled -eq $false -and $bhrEmploymentStatus.Trim() -eq 'Terminated' -and $entraIdStatus -eq $false ) {
-                        # Account is already disabled. Check whether the full offboarding process
-                        # actually completed by inspecting profile fields that get overwritten during
-                        # offboarding. If CompanyName does not start with a date stamp (MM/DD/YY),
-                        # Department/JobTitle/OfficeLocation are not set to 'Not Active', or phone
-                        # fields still contain values, the offboarding was interrupted or never ran —
-                        # re-run it.
-                        $offboardingComplete = Test-IsOffboardingComplete -CompanyName $entraIdCompanyName -Department $entraIdDepartment -JobTitle $entraIdJobTitle -OfficeLocation $entraIdOfficeLocation -WorkPhone $entraIdWorkPhone -MobilePhone $entraIdMobilePhone
-
-                        if (-not $offboardingComplete) {
-                          Write-PSLog -Message "$bhrWorkEmail is disabled but offboarding appears incomplete (Company='$entraIdCompanyName', Dept='$entraIdDepartment', Title='$entraIdJobTitle', Office='$entraIdOfficeLocation', WorkPhone='$entraIdWorkPhone', MobilePhone='$entraIdMobilePhone'). Re-running offboarding." -Severity Warning
-                          # Re-run the same offboarding block that fires when the account transitions
-                          # from enabled to disabled. We set $entraIdStatus to $true so the primary
-                          # termination condition above will match on the next pass, but since we are
-                          # already past that branch we duplicate the key termination actions here.
-
-                          $error.clear()
-                          if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Complete missed offboarding (Update Profile, Convert to Shared Mailbox, Remove Licenses and Groups)')) {
-                            $leaveDateTimeUtc = (Get-Date).ToUniversalTime()
-
-                            # Overwrite profile fields with termination placeholders (CompanyName set last as completion marker)
-                            Write-PSLog -Message "Setting termination profile fields for $bhrWorkEmail" -Severity Information
-                            Set-TerminatedUserProfileFields -UserId $bhrWorkEmail -LeaveDateTimeUtc $leaveDateTimeUtc
-
-                            # Remove Licenses
-                            Write-PSLog -Message "Removing licenses for $bhrWorkEmail..." -Severity Information
-                            Get-MgUserLicenseDetail -UserId $bhrWorkEmail | ForEach-Object { Set-MgUserLicense -UserId $bhrWorkEmail -RemoveLicenses $_.SkuId -AddLicenses @{} }
-
-                            # Remove group memberships
-                            Write-PSLog -Message "Removing group memberships for $bhrWorkEmail" -Severity Information
-                            Get-MgUserMemberOf -UserId $bhrWorkEmail | ForEach-Object {
-                              $groupMembership = $_
-                              try {
-                                Invoke-WithRetry -Operation "Remove group membership $($groupMembership.Id) for: $bhrWorkEmail" -ScriptBlock {
-                                  Remove-MgGroupMemberByRef -GroupId $groupMembership.id -DirectoryObjectId $entraIdUpnObjDetails.id -ErrorAction Stop
-                                }
-                              }
-                              catch {
-                                Write-PSLog -Message "Failed to remove $bhrWorkEmail from Entra group $($groupMembership.Id): $($_.Exception.Message)" -Severity Warning
-                              }
-                            }
-
-                            # Remove distribution list memberships
-                            Write-PSLog -Message "Removing distribution list memberships for $bhrWorkEmail" -Severity Information
-                            Connect-ExchangeOnlineIfNeeded -TenantId $Script:Config.Azure.TenantId
-                            try {
-                              $distributionGroups = Get-CachedDistributionGroups -Cache $performanceCache
-                              foreach ($distributionGroup in $distributionGroups) {
-                                try {
-                                  $members = Get-DistributionGroupMember -Identity $distributionGroup.Identity -ResultSize Unlimited -ErrorAction SilentlyContinue |
-                                    Where-Object { $_.PrimarySmtpAddress -eq $bhrWorkEmail }
-                                    if ($members) {
-                                      Remove-DistributionGroupMember -Identity $distributionGroup.Identity -Member $bhrWorkEmail -BypassSecurityGroupManagerCheck -Confirm:$false -ErrorAction Stop
-                                      Write-PSLog -Message "Removed $bhrWorkEmail from distribution group $($distributionGroup.DisplayName)" -Severity Information
-                                    }
-                                  }
-                                  catch {
-                                    Write-PSLog -Message "Failed to remove $bhrWorkEmail from distribution group $($distributionGroup.DisplayName): $($_.Exception.Message)" -Severity Warning
-                                  }
-                                }
-                              }
-                              catch {
-                                Write-PSLog -Message "Failed to enumerate distribution groups: $($_.Exception.Message)" -Severity Warning
-                              }
-
-                              # Convert mailbox to shared if not already
-                              Write-PSLog -Message "Ensuring $bhrWorkEmail mailbox is shared" -Severity Information
-                              try {
-                                Set-Mailbox -Identity $bhrWorkEmail -Type Shared -ErrorAction Stop
-                                $null = Wait-ForCondition -Operation "Mailbox conversion to shared for $bhrWorkEmail" -TimeoutSeconds 120 -PollIntervalSeconds 10 -Condition {
-                                  (Get-EXOMailbox -Anr $bhrWorkEmail -ErrorAction Stop).RecipientTypeDetails -eq 'SharedMailbox'
-                                }
-                              }
-                              catch {
-                                Write-PSLog -Message "Mailbox conversion for $bhrWorkEmail may have already been done or failed: $($_.Exception.Message)" -Severity Warning
-                              }
-
-                              # Remove Manager
-                              Write-PSLog -Message "Removing manager for $bhrWorkEmail" -Severity Information
-                              Remove-MgUserManagerByRef -UserId $bhrWorkEmail -ErrorAction SilentlyContinue
-
-                              # Mark EmployeeId as LVR
-                              Invoke-WithRetry -Operation "Mark user as on leave: $bhrWorkEmail" -ScriptBlock {
-                                Update-MgUser -EmployeeId 'LVR' -UserId $bhrWorkEmail
-                              }
-
-                              # CompanyName is updated last as the completion marker
-                              Write-PSLog -Message "Setting CompanyName completion stamp for $bhrWorkEmail" -Severity Information
-                              Update-MgUser -UserId $bhrWorkEmail -CompanyName (Get-OffboardingCompletionMarker -LeaveDateTimeUtc $leaveDateTimeUtc)
-
-                              Add-SignificantChange -Category Disabled -User $bhrWorkEmail -Detail 'Offboarding completed (was incomplete)'
-                              Write-PSLog -Message "Completed missed offboarding for $bhrWorkEmail" -Severity Information
-                            }
-                          }
-                          else {
-                            Write-PSLog -Message "$bhrWorkEmail is disabled and offboarding is complete. Nothing to do." -Severity Debug
-                          }
-                        }
-                        else {
-                          Write-PSLog 'User account active, looking for user updates.' -Severity Debug
-
-                          if ($bhrAccountEnabled -eq $true -and $entraIdstatus -eq $false) {
-                            # The account is marked "Active" in BHR and "Inactive" in Entra ID, enable the Entra ID account
-                            Write-PSLog -Message "$bhrWorkEmail is marked Active in BHR and Inactive in Entra ID" -Severity Debug
-
-                            #Change to a random pass
-                            $newPas = (Get-NewPassword)
-                            $params = @{
-                              PasswordProfile = @{
-                                ForceChangePasswordNextSignIn = $true
-                                Password                      = $newPas
-                              }
-                            }
-
-                            if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Re-enable User Account (Reset Password and Convert from Shared Mailbox)')) {
-                              Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -AccountEnabled:$bhrAccountEnabled" -Severity Debug
-                              Invoke-WithRetry -Operation "Re-enable user account: $bhrWorkEmail" -ScriptBlock {
-                                Update-MgUser -UserId $bhrWorkEmail -AccountEnabled:$bhrAccountEnabled
-                              }
-                              Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params" -Severity Debug
-                              Invoke-WithRetry -Operation "Update re-enabled user attributes: $bhrWorkEmail" -ScriptBlock {
-                                Update-MgUser -UserId $bhrWorkEmail -BodyParameter $params
-                              }
-
-                              # Convert mailbox from shared to user mailbox
-                              Connect-ExchangeOnlineIfNeeded -TenantId $TenantId
-
-                              Write-PSLog -Message "Executing: Set-Mailbox -Identity $bhrWorkEmail -Type Regular" -Severity Debug
-                              Write-PSLog -Message "Converting $bhrWorkEmail to a user mailbox..." -Severity Debug
-                              try {
-                                Set-Mailbox -Identity $bhrWorkEmail -Type Regular -ErrorAction Stop
-                              }
-                              catch {
-                                Write-PSLog -Message "Failed to convert $bhrWorkEmail to a user mailbox. Error: $($_.Exception.Message)" -Severity Warning
-                              }
-
-                              $null = Wait-ForCondition -Operation "Mailbox conversion to regular for $bhrWorkEmail" -TimeoutSeconds 120 -PollIntervalSeconds 10 -Condition {
-                                (Get-EXOMailbox -Anr $bhrWorkEmail -ErrorAction Stop).RecipientTypeDetails -eq 'UserMailbox'
-                              }
-
-                              # Remove permissions to converted mailbox to previous manager
-                              $mObj = Get-EXOMailbox -Anr $bhrWorkEmail
-                              Write-PSLog "`tShared permissions being revoked for $bhrWorkEmail..." -Severity Information
-                              Write-PSLog "Executing: Remove-MailboxPermission -Identity $($mObj.Id) -ResetDefault" -Severity Debug
-                              try {
-                                Remove-MailboxPermission -Identity $mObj.Id -ResetDefault -ErrorAction Stop | Out-Null
-                              }
-                              catch {
-                                Write-PSLog -Message "Failed to remove mailbox permissions for $bhrWorkEmail. Error: $($_.Exception.Message)" -Severity Warning
-                              }
-
-                              # Remove automatic replies when the account is reactivated
-                              Write-PSLog -Message "Removing automatic replies for $bhrWorkEmail" -Severity Information
-                              Write-PSLog -Message "Executing: Set-MailboxAutoReplyConfiguration -Identity $bhrWorkEmail -AutoReplyState Disabled" -Severity Debug
-                              try {
-                                Invoke-WithRetry -Operation "Disable automatic replies for: $bhrWorkEmail" -ScriptBlock {
-                                  Set-MailboxAutoReplyConfiguration -Identity $bhrWorkEmail `
-                                    -AutoReplyState Disabled `
-                                    -InternalMessage '' `
-                                    -ExternalMessage '' `
-                                    -ErrorAction Stop
-                                }
-                              }
-                              catch {
-                                Write-PSLog -Message "Failed to disable automatic replies for $bhrWorkEmail. Error: $($_.Exception.Message)" -Severity Warning
-                              }
-
-                              $params = @{
-                                Message         = @{
-                                  Subject      = "User Account Re-enabled: $bhrdisplayName"
-                                  Body         = @{
-                                    ContentType = 'html'
-                                    Content     = "<br/>One of your direct report's user account has been re-enabled. Please securely share this information with them so that they can login.<br/> User name: $bhrWorkEmail <br/> Temporary Password: $newPas.`n<br/><br/> $($Script:Config.Email.EmailSignature)"
-                                  }
-                                  ToRecipients = @(
-                                    @{
-                                      EmailAddress = @{
-                                        Address = $bhrSupervisorEmail
-                                      }
-                                    }
-
-                                    @{
-                                      EmailAddress = @{
-                                        Address = $NotificationEmailAddress
-                                      }
-                                    }
-                                    @{
-                                      EmailAddress = @{
-                                        Address = $AdminEmailAddress
-                                      }
-                                    }
-                                  )
-                                }
-                                SaveToSentItems = 'True'
-                              }
-
-                              Invoke-WithRetry -Operation 'Send re-enable notification email' -ScriptBlock {
-                                Send-MgUserMail -BodyParameter $params -UserId $Script:Config.Email.AdminEmailAddress -Verbose
-                              }
-
-                              New-AdaptiveCard {
-
-                                New-AdaptiveTextBlock -Text "User Account $bhrWorkEmail Re-enabled" -HorizontalAlignment Center -Wrap -Weight Large
-                                New-AdaptiveTextBlock -Text "User name: $bhrWorkEmail" -Wrap
-                                New-AdaptiveTextBlock -Text "Temporary Password: $newPas" -Wrap
-                              } -Uri $TeamsCardUri -Speak "User Account Re-enabled: $bhrdisplayName"
-
-
-                              Write-PSLog -Message " Account $bhrWorkEmail marked as Active in BambooHR but Inactive in Entra ID. Enabled Entra ID account for sign-in." -Severity Information
-                              $error.Clear()
-                            }
-                          }
-                          else {
-                            Write-PSLog -Message 'Account is in the correct state: Enabled in both BHR and Entra ID' -Severity Debug
-                          }
-
-                          # Checking JobTitle if correctly set, if not, configure the JobTitle as set in BambooHR
-                          if ($entraIdJobTitle.Trim() -ne $bhrJobTitle.Trim()) {
-                            Write-PSLog -Message "Entra ID Job Title $entraIdJobTitle does not match BHR Job Title $bhrJobTitle. Updating title." -Severity Debug
-
-                            if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
-
-                              Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -JobTitle '$bhrJobTitle'" -Severity Debug
-                              try {
-                                Invoke-WithRetry -Operation "Update JobTitle for: $bhrWorkEmail" -ScriptBlock {
-                                  if ([string]::IsNullOrWhiteSpace($bhrJobTitle) -eq $false) {
-                                    Update-MgUser -UserId $bhrWorkEmail -JobTitle $bhrJobTitle
-                                  }
-                                  else {
-                                    Update-MgUser -UserId $bhrWorkEmail -JobTitle $null
-                                  }
-                                }
-                                $error.Clear()
-                                Write-PSLog -Message "JobTitle for $bhrWorkEmail in Entra ID set from '$entraIdjobTitle' to '$bhrjobTitle'." -Severity Information
-                              }
-                              catch {
-                                Write-PSLog -Message "Error changing Job Title of $bhrWorkEmail.`nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
-
-                                # Track error for summary report
-                                $errorSummary.TotalErrors++
-                                $errorType = 'AttributeUpdate_JobTitle'
-                                if (-not $errorSummary.ErrorsByType.ContainsKey($errorType)) {
-                                  $errorSummary.ErrorsByType[$errorType] = 0
-                                }
-                                $errorSummary.ErrorsByType[$errorType]++
-                                if (-not $errorSummary.ErrorsByUser.ContainsKey($bhrWorkEmail)) {
-                                  $errorSummary.ErrorsByUser[$bhrWorkEmail] = 'JobTitle update failed'
-                                }
-
-                                $error.Clear()
-                              }
-                            }
-                          }
-
-                          # Checking department if correctly set, if not, configure the Department as set in BambooHR
-                          if ($entraIdDepartment.Trim() -ne $bhrDepartment.Trim()) {
-                            Write-PSLog -Message "Entra ID department '$entraIdDepartment' does not match BambooHR department '$($bhrDepartment.Trim())'" -Severity Debug
-                            if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
-                              Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -Department $bhrDepartment" -Severity Debug
-                              try {
-                                Invoke-WithRetry -Operation "Update Department for: $bhrWorkEmail" -ScriptBlock {
-                                  Update-MgUser -UserId $bhrWorkEmail -Department "$bhrDepartment"
-                                }
-                                $error.Clear()
-                                Write-PSLog -Message "Department for $bhrWorkEmail in Entra ID set from '$entraIdDepartment' to '$bhrDepartment'." -Severity Information
-                              }
-                              catch {
-                                Write-PSLog -Message "Error changing Department of $bhrWorkEmail `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
-
-                                # Track error for summary report
-                                $errorSummary.TotalErrors++
-                                $errorType = 'AttributeUpdate_Department'
-                                if (-not $errorSummary.ErrorsByType.ContainsKey($errorType)) {
-                                  $errorSummary.ErrorsByType[$errorType] = 0
-                                }
-                                $errorSummary.ErrorsByType[$errorType]++
-                                if (-not $errorSummary.ErrorsByUser.ContainsKey($bhrWorkEmail)) {
-                                  $errorSummary.ErrorsByUser[$bhrWorkEmail] = 'Department update failed'
-                                }
-
-                                $error.Clear()
-                              }
-                            }
-                          }
-                          else {
-                            Write-PSLog "Entra ID and BHR department already matches $entraIdDepartment" -Severity Debug
-                          }
-
-                          # Checking the manager if correctly set, and removing it when BambooHR clears the relationship.
-                          $shouldRemoveManager = [string]::IsNullOrWhiteSpace($bhrSupervisorEmail) -and -not [string]::IsNullOrWhiteSpace($entraIdSupervisorEmail)
-                          $shouldSetManager = -not [string]::IsNullOrWhiteSpace($bhrSupervisorEmail) -and $entraIdSupervisorEmail -ne $bhrSupervisorEmail
-                          if ($shouldRemoveManager) {
-                            Write-PSLog -Message "BambooHR manager is empty for $bhrWorkEmail; removing stale Entra ID manager '$entraIdSupervisorEmail'." -Severity Debug
-                            if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Remove User Manager')) {
-                              try {
-                                Invoke-WithRetry -Operation "Remove manager for: $bhrWorkEmail" -ScriptBlock {
-                                  Remove-MgUserManagerByRef -UserId $bhrWorkEmail -ErrorAction Stop
-                                }
-                                $error.Clear()
-                                Write-PSLog -Message "Removed manager '$entraIdSupervisorEmail' from $bhrWorkEmail because BambooHR no longer has a supervisor assigned." -Severity Information
-                                Add-SignificantChange -Category ManagerChanged -User $bhrWorkEmail -Detail "$entraIdSupervisorEmail -> <none>"
-                              }
-                              catch {
-                                Write-PSLog -Message "Error removing manager of $bhrWorkEmail. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
-                                $errorSummary.TotalErrors++
-                                $errorType = 'ManagerRemoval'
-                                if (-not $errorSummary.ErrorsByType.ContainsKey($errorType)) {
-                                  $errorSummary.ErrorsByType[$errorType] = 0
-                                }
-                                $errorSummary.ErrorsByType[$errorType]++
-                                $errorSummary.ErrorsByUser[$bhrWorkEmail] = "Failed to remove manager: $($_.Exception.Message)"
-                                $error.Clear()
-                              }
-                            }
-                          }
-                          elseif ($shouldSetManager) {
-                            Write-PSLog -Message "Manager in Entra ID '$entraIdSupervisorEmail' does not match BHR manager '$bhrSupervisorEmail'" -Severity Debug
-
-                            $managerUser = Get-ValidManagerUser -UserPrincipalName $bhrSupervisorEmail -Cache $performanceCache -TargetUser $bhrWorkEmail
-
-                            if ($managerUser) {
-                              $newManager = @{
-                                '@odata.id' = "https://graph.microsoft.com/v1.0/users/$($managerUser.Id)"
-                              }
-
-                              if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
-                                Write-PSLog -Message "Executing: Set-MgUserManagerByRef -UserId $bhrWorkEmail -BodyParameter $newManager" -Severity Debug
-                                try {
-                                  Invoke-WithRetry -Operation "Set manager for: $bhrWorkEmail" -ScriptBlock {
-                                    Set-MgUserManagerByRef -UserId $bhrWorkEmail -BodyParameter $newManager
-                                  }
-                                  $error.Clear()
-                                  Write-PSLog -Message "Manager of $bhrWorkEmail in Entra ID '$entraIdsupervisorEmail' and in BambooHR '$bhrsupervisorEmail'. Setting new manager to the Azure User Object." -Severity Information
-                                  Add-SignificantChange -Category ManagerChanged -User $bhrWorkEmail -Detail "$entraIdSupervisorEmail -> $bhrSupervisorEmail"
-                                }
-                                catch {
-                                  Write-PSLog -Message "Error changing manager of $bhrWorkEmail. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
-
-                                  # Track error for summary report
-                                  $errorSummary.TotalErrors++
-                                  $errorType = 'ManagerAssignment'
-                                  if (-not $errorSummary.ErrorsByType.ContainsKey($errorType)) {
-                                    $errorSummary.ErrorsByType[$errorType] = 0
-                                  }
-                                  $errorSummary.ErrorsByType[$errorType]++
-                                  $errorSummary.ErrorsByUser[$bhrWorkEmail] = "Failed to set manager: $($_.Exception.Message)"
-
-                                  $error.Clear()
-                                }
-                              }
-                            }
-                          }
-                          else {
-                            Write-PSLog -Message "Supervisor email already correct $entraIdSuperVisorEmail" -Severity Debug
-                          }
-
-                          # Check and set the Office Location
-                          if ($entraIdOfficeLocation.Trim() -ne $bhrOfficeLocation.Trim()) {
-                            Write-PSLog -Message "Entra ID office location '$entraIdOfficeLocation' does not match BHR hire data '$bhrOfficeLocation'" -Severity Debug
-                            if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
-                              Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -OfficeLocation $($bhrOfficeLocation.Trim())" -Severity Debug
-                              try {
-                                Invoke-WithRetry -Operation "Update OfficeLocation for: $bhrWorkEmail" -ScriptBlock {
-                                  Update-MgUser -UserId $bhrWorkEmail -OfficeLocation $bhrOfficeLocation.Trim()
-                                }
-                                $error.Clear()
-                                Write-PSLog -Message "Office location of $bhrWorkEmail in Entra ID changed from '$entraIdOfficeLocation' to '$bhrOfficeLocation'." -Severity Information
-                              }
-                              catch {
-                                Write-PSLog -Message "Error changing employee office location. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
-                                $error.Clear()
-                              }
-                            }
-                          }
-                          else {
-                            Write-PSLog -Message "Office Location correct $entraIdOfficeLocation" -Severity Debug
-                          }
-
-                          # Check and set the Employee Hire Date
-                          if ($entraIdHireDate -ne $normalizedBhrHireDate) {
-                            Write-PSLog -Message "Entra ID hire date '$entraIdHireDate' does not match BHR hire data '$normalizedBhrHireDate'" -Severity Debug
-                            if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
-                              Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -EmployeeHireDate $normalizedBhrHireDate" -Severity Debug
-                              try {
-                                Invoke-WithRetry -Operation "Update EmployeeHireDate for: $bhrWorkEmail" -ScriptBlock {
-                                  Update-MgUser -UserId $bhrWorkEmail -EmployeeHireDate $normalizedBhrHireDate
-                                }
-                                $error.Clear()
-                                Write-PSLog -Message "Hire date of $bhrWorkEmail changed from '$entraIdHireDate' in Entra ID and BHR '$normalizedBhrHireDate'." -Severity Information
-                              }
-                              catch {
-                                Write-PSLog -Message "Error changing $bhrWorkEmail hire date. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
-                                $error.Clear()
-                              }
-                            }
-                          }
-                          else {
-                            Write-PSLog -Message "Hire date already correct $entraIdHireDate" -Severity Debug
-                          }
-
-                          # Check and set the work phone ignoring formatting
-                          # Treat empty/whitespace and '0' as equivalent (both mean "no phone")
-                          $normalizedBhrWork = Get-WorkPhoneComparisonValue -PhoneNumber $bhrWorkPhone
-                          $normalizedEntraWork = Get-WorkPhoneComparisonValue -PhoneNumber $entraIdWorkPhone
-                          if ($normalizedEntraWork -ne $normalizedBhrWork) {
-
-                            Write-PSLog -Message "Entra ID work phone '$entraIdWorkPhone' does not match BHR '$bhrWorkPhone'" -Severity Debug
-                            if ([string]::IsNullOrWhiteSpace($bhrWorkPhone)) {
-                              $bhrWorkPhone = '0'
-                            }
-
-                            if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
-                              $workPhoneUpdated = $false
-                              if ([string]::IsNullOrWhiteSpace($bhrWorkPhone)) {
-                                $bhrWorkPhone = '0'
-                                Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BusinessPhones '$bhrWorkPhone'" -Severity Debug
-                                try {
-                                  Invoke-WithRetry -Operation "Update BusinessPhones for: $bhrWorkEmail" -ScriptBlock {
-                                    Update-MgUser -UserId $bhrWorkEmail -BusinessPhones $bhrWorkPhone -ErrorAction Stop | Out-Null
-                                  }
-                                  $workPhoneUpdated = $true
-                                }
-                                catch {
-                                  Write-PSLog -Message "Error changing work phone for $bhrWorkEmail. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
-                                  $error.Clear()
-                                }
-                              }
-                              else {
-                                [string]$bhrWorkPhone = ConvertTo-PhoneNumber $bhrWorkPhone
-                                Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -BusinessPhones $bhrWorkPhone" -Severity Debug
-                                try {
-                                  Invoke-WithRetry -Operation "Update BusinessPhones for: $bhrWorkEmail" -ScriptBlock {
-                                    Update-MgUser -UserId $bhrWorkEmail -BusinessPhones $bhrWorkPhone -ErrorAction Stop | Out-Null
-                                  }
-                                  $workPhoneUpdated = $true
-                                }
-                                catch {
-                                  Write-PSLog -Message "Error changing work phone for $bhrWorkEmail. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
-                                  $error.Clear()
-                                }
-                              }
-
-                              if ($workPhoneUpdated) {
-                                $error.Clear()
-                                Write-PSLog -Message "Work Phone for '$bhrWorkEmail' changed from '$entraIdWorkPhone' to '$bhrWorkPhone'" -Severity Information
-                              }
-                            }
-                          }
-                          else {
-                            Write-PSLog -Message "Work phone correct $entraIdWorkEmail $entraIdWorkPhone" -Severity Debug
-                          }
-
-                          if ($Script:Config.Features.EnableMobilePhoneSync) {
-                            [string]$entraIdMobilePhone = $entraIdMobilePhone -replace '[^0-9]', ''
-                            [string]$bhrMobilePhone = $bhrMobilePhone -replace '[^0-9]', ''
-                            # Check and set the mobile phone ignoring formatting
-                            if ($entraIdMobilePhone -ne $bhrMobilePhone) {
-
-                              Write-PSLog -Message "Entra ID mobile phone '$entraIdMobilePhone' does not match BHR '$bhrMobilePhone'" -Severity Debug
-
-                              if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
-                                $mobilePhoneUpdated = $false
-                                if ([string]::IsNullOrWhiteSpace($bhrMobilePhone)) {
-                                  $bhrMobilePhone = '0'
-                                  Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -MobilePhone '$bhrMobilePhone'" -Severity Debug
-                                  try {
-                                    Invoke-WithRetry -Operation "Update MobilePhone for: $bhrWorkEmail" -ScriptBlock {
-                                      Update-MgUser -UserId $bhrWorkEmail -MobilePhone $bhrMobilePhone -ErrorAction Stop
-                                    }
-                                    $mobilePhoneUpdated = $true
-                                  }
-                                  catch {
-                                    Write-PSLog -Message "Error changing $bhrWorkEmail mobile phone. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
-                                    $error.Clear()
-                                  }
-                                }
-                                else {
-                                  $bhrMobilePhone = ($bhrMobilePhone -replace '[^0-9]', '' ) -replace '^1', ''
-                                  $bhrMobilePhone = '{0:(###) ###-####}' -f [int64]$bhrMobilePhone
-                                  Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -MobilePhone $bhrMobilePhone" -Severity Debug
-                                  try {
-                                    Invoke-WithRetry -Operation "Update MobilePhone for: $bhrWorkEmail" -ScriptBlock {
-                                      Update-MgUser -UserId $bhrWorkEmail -MobilePhone $bhrMobilePhone -ErrorAction Stop
-                                    }
-                                    $mobilePhoneUpdated = $true
-                                  }
-                                  catch {
-                                    Write-PSLog -Message "Error changing $bhrWorkEmail mobile phone. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
-                                    $error.Clear()
-                                  }
-                                }
-
-                                if ($mobilePhoneUpdated) {
-                                  $error.Clear()
-                                  Write-PSLog -Message "Work Mobile Phone for '$bhrWorkEmail' changed from '$entraIdMobilePhone' to '$bhrMobilePhone'" -Severity Debug
-                                }
-                              }
-                            }
-                            else {
-                              Write-PSLog -Message "Mobile phone correct for $entraIdWorkEmail $entraIdMobilePhone" -Severity Debug
-                            }
-                          }
-
-                          # Compare user employee id with BambooHR and set it if not correct
-                          if ($bhrEmployeeNumber.Trim() -ne $entraIdEmployeeNumber.Trim()) {
-                            Write-PSLog -Message " BHR employee number $bhrEmployeeNumber does not match Entra ID employee id $entraIdEmployeeNumber" -Severity Debug
-                            if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
-                              Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -EmployeeId $bhremployeeNumber  "
-                              # Setting the Employee ID found in BHR to the user in Entra ID
-                              try {
-                                Invoke-WithRetry -Operation "Update EmployeeId for: $bhrWorkEmail" -ScriptBlock {
-                                  Update-MgUser -UserId $bhrWorkEmail -EmployeeId $bhremployeeNumber.Trim() -ErrorAction Stop
-                                }
-                                Write-PSLog -Message " The ID $bhremployeeNumber has been set to $bhrWorkEmail Entra ID account." -Severity Warning
-                                $error.Clear()
-                              }
-                              catch {
-                                Write-PSLog -Message " Error changing EmployeeId. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
-                                $error.Clear()
-                              }
-                            }
-                          }
-                          else {
-                            Write-PSLog -Message "Employee ID matched $bhrEmployeeNumber and $entraIdEmployeeNumber" -Severity Debug
-                          }
-
-                          # Set Company name to $($Script:Config.Azure.CompanyName)"
-                          if ($entraIdCompanyName.Trim() -ne $Script:Config.Azure.CompanyName.Trim()) {
-                            Write-PSLog -Message "Entra ID company name '$entraIdCompany' does not match '$($Script:Config.Azure.CompanyName)'" -Severity Debug
-                            if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
-                              # Setting Company Name as $CompanyName to the employee, if not already set
-                              Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -CompanyName $($CompanyName.Trim())" -Severity Debug
-                              try {
-                                Invoke-WithRetry -Operation "Update CompanyName for: $bhrWorkEmail" -ScriptBlock {
-                                  Update-MgUser -UserId $bhrWorkEmail -CompanyName $CompanyName.Trim() -ErrorAction Stop
-                                }
-                                Write-PSLog -Message " The $bhrWorkEmail employee Company attribute has been set to: $($Script:Config.Azure.CompanyName)." -Severity Information
-                              }
-                              catch {
-                                Write-PSLog -Message " Could not change the Company Name of $bhrWorkEmail. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
-                                $error.Clear()
-                              }
-                            }
-                          }
-                          else {
-                            Write-PSLog -Message "Company name already matched in Entra ID and BHR $entraIdCompanyName" -Severity Debug
-                          }
-
-                          # Set LastModified from BambooHR to ExtensionAttribute1 in Entra ID
-
-                          if ($upnExtensionAttribute1 -ne $bhrLastChanged) {
-                            # Setting the "lastchanged" attribute from BambooHR to ExtensionAttribute1 in Entra ID
-                            Write-PSLog -Message "Entra ID Extension Attribute '$upnExtensionAttribute1' does not match BHR last changed '$bhrLastChanged'" -Severity Debug
-                            Write-PSLog -Message 'Set LastModified from BambooHR to ExtensionAttribute1 in Entra ID' -Severity Debug
-
-                            if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
-                              Write-PSLog -Message "Executing: $null = Update-MgUser -UserId $bhrWorkEmail -OnPremisesExtensionAttributes @{extensionAttribute1 = '$bhrLastChanged' }" -Severity Debug
-                              # TODO: Does not work for on premises synched accounts. Not a problem with Entra ID native.
-                              try {
-                                $null = Update-MgUser -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrLastChanged } -UserId $bhrWorkEmail -ErrorAction Stop | Out-Null
-                                Write-PSLog -Message "$bhrWorkEmail LastChanged attribute set from '$upnExtensionAttribute1' to '$bhrlastChanged'." -Severity Information
-                              }
-                              catch {
-                                $error.Clear()
-                              }
-                            }
-
-                            $error.clear()
-                          }
-                          else {
-                            Write-PSLog -Message "Attribute already matched last changed of $bhrLastChanged" -Severity Debug
-                          }
-                        }
-                      }
-                    }
-                    else {
-                      Write-PSLog -Message "Entra ID user found for $bhrWorkEmail but no attribute sync needed (last changed dates match or user is suspended)" -Severity Debug
-
-                      # This might not be needed anymore
-                      $entraIdWorkEmail = ''
-                      $entraIdJobTitle = ''
-                      $entraIdDepartment = ''
-                      $entraIdStatus = $false
-                      $entraIdEmployeeNumber = ''
-                      $entraIdSupervisorEmail = ''
-                      $entraIdDisplayname = ''
-                      $entraIdHireDate = ''
-                      $entraIdFirstName = ''
-                      $entraIdLastName = ''
-                      $entraIdCompanyName = ''
-                      $entraIdWorkPhone = ''
-                      $entraIdOfficeLocation = ''
-                    }
-
-                    # Handle name changes
-                    if (($entraIdEmployeeNumber2 -eq $bhremployeeNumber) -and ($historystatus -notlike '*inactive*') -and ($entraIdUpnObjDetails.id -eq $entraIdEidObjDetails.id)) {
-
-                      $entraIdUPN = $entraIdEidObjDetails.UserPrincipalName
-                      $entraIdObjectID = $entraIdEidObjDetails.id
-                      $entraIdworkemail = $entraIdEidObjDetails.Mail
-                      $entraIdemployeeNumber = $entraIdEidObjDetails.EmployeeID
-                      $entraIddisplayname = $entraIdEidObjDetails.displayname
-                      $entraIdfirstName = $entraIdEidObjDetails.GivenName
-                      $entraIdlastName = $entraIdEidObjDetails.Surname
-
-                      Write-PSLog -Message "Evaluating if Entra ID name change is required for $entraIdfirstName $entraIdlastName ($entraIddisplayname) `n`t Work Email: $entraIdWorkEmail UserPrincipalName: $entraIdUpn EmployeeId: $entraIdEmployeeNumber" -Severity Debug
-
-                      $error.Clear()
-
-                      # 3/31/2023 Is this required here or should it be handled after the name change or the next sync after the name change?
-                      # Set LastModified from BambooHR to ExtensionAttribute1 in Entra ID
-                      if ($EIDExtensionAttribute1 -ne $bhrlastChanged) {
-                        if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
-
-                          # Setting the "lastchanged" attribute from BambooHR to ExtensionAttribute1 in Entra ID
-                          Write-PSLog -Message "Executing: Update-MgUser -UserId $entraIdObjectID -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged } " -Severity Debug
-                          # This does not work for AD on premises synced accounts.
-                          $null = Update-MgUser -UserId $entraIdObjectID -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged } -ErrorAction SilentlyContinue | Out-Null
+                        catch {
+                          Write-PSLog -Message "Error changing $bhrWorkEmail mobile phone. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
                         }
                       }
 
-                      # Change last name in Entra ID
-                      if ($entraIdLastName -ne $bhrLastName) {
-                        Write-PSLog -Message " Last name in Entra ID $entraIdLastName does not match in BHR $bhrLastName" -Severity Debug
-                        Write-PSLog -Message " Changing the last name of $bhrWorkEmail from $entraIdLastName to $bhrLastName." -Severity Debug
-                        if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
-                          Write-PSLog -Message "Executing: Update-MgUser -UserId $entraIdObjectID -Surname $bhrLastName" -Severity Debug
-                          try {
-                            Invoke-WithRetry -Operation "Update surname for: $bhrWorkEmail" -ScriptBlock {
-                              Update-MgUser -UserId $entraIdObjectID -Surname $bhrLastName -ErrorAction Stop
-                            }
-                            Write-PSLog -Message " Successfully changed the last name of $bhrWorkEmail from $entraIdLastName to $bhrLastName." -Severity Information
-                            Add-SignificantChange -Category NameChanged -User $bhrWorkEmail -Detail "Name: '$entraIdDisplayName' -> '$bhrDisplayName'"
-                            Write-PSLog -Message "Name change: $bhrWorkEmail" -Severity Information
-                          }
-                          catch {
-                            Write-PSLog -Message "Error changing Entra ID Last Name.`n`nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
-                            $error.Clear()
-                          }
-                        }
-                      }
-
-                      # Change First Name in Entra ID
-                      if ($entraIdfirstName -ne $bhrfirstName) {
-                        Write-PSLog "Entra ID first name '$entraIdfirstName' is not equal to BHR first name '$bhrFirstName'" -Severity Debug
-                        if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
-                          Write-PSLog -Message "Executing: Update-MgUser -UserId $entraIdObjectID -GivenName $bhrFirstName" -Severity Debug
-                          try {
-                            Invoke-WithRetry -Operation "Update given name for: $bhrWorkEmail" -ScriptBlock {
-                              Update-MgUser -UserId $entraIdObjectID -GivenName $bhrFirstName -ErrorAction Stop
-                            }
-                            Write-PSLog -Message " Successfully changed $entraIdObjectID first name from $entraIdFirstName to $bhrFirstName." -Severity Information
-                            Add-SignificantChange -Category NameChanged -User $bhrWorkEmail -Detail "Name: '$entraIdDisplayName' -> '$bhrDisplayName'"
-                            Write-PSLog -Message "Name change: $bhrWorkEmail" -Severity Information
-                          }
-                          catch {
-                            Write-PSLog -Message "Could not change the First Name of $entraIdObjectID. Error details below. `n`nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
-                            $error.Clear()
-                          }
-                        }
-                      }
-
-                      # Change display name
-                      if ($entraIdDisplayname -ne $bhrDisplayName) {
-                        Write-PSLog -Message "Entra ID Display Name $entraIdDisplayname is not equal to BHR $bhrDisplayName" -Severity Debug
-                        if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
-                          Write-PSLog -Message "Executing: Update-MgUser -UserId $entraIdObjectID -DisplayName $bhrdisplayName" -Severity Debug
-                          try {
-                            Invoke-WithRetry -Operation "Update display name for: $bhrWorkEmail" -ScriptBlock {
-                              Update-MgUser -UserId $entraIdObjectID -DisplayName $bhrdisplayName -ErrorAction Stop
-                            }
-                            Write-PSLog " Display name $entraIdDisplayName of $entraIdObjectID changed to $bhrDisplayName." -Severity Information
-                            Add-SignificantChange -Category NameChanged -User $bhrWorkEmail -Detail "Name: '$entraIdDisplayName' -> '$bhrDisplayName'"
-                            Write-PSLog -Message "Name change: $bhrWorkEmail" -Severity Information
-                          }
-                          catch {
-                            Write-PSLog -Message " Could not change the Display Name. Error details below. `n`nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
-                            $error.Clear()
-                          }
-                        }
-                      }
-
-                      # Change Email Address
-                      if ($entraIdWorkEmail -ne $bhrWorkEmail) {
-                        Write-PSLog -Message "Entra ID work email $entraIdWorkEmail does not match BHR work email $bhrWorkEmail"
-                        if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
-                          Write-PSLog -Message "Executing: Update-MgUser -UserId $entraIdObjectID -Mail $bhrWorkEmail"
-                          try {
-                            Invoke-WithRetry -Operation "Update mail for: $bhrWorkEmail" -ScriptBlock {
-                              Update-MgUser -UserId $entraIdObjectID -Mail $bhrWorkEmail -ErrorAction Stop
-                            }
-                            # Change Email Address error logging
-                            Write-PSLog "The current Email Address: $entraIdworkemail of $entraIdObjectID has been changed to $bhrWorkEmail." -Severity Warning
-                          }
-                          catch {
-                            Write-PSLog -Message "Error changing Email Address. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
-                            $error.Clear()
-                          }
-                        }
-                      }
-
-                      # Change UserPrincipalName and send the details via email to the User
-                      if ($entraIdUpn -ne $bhrWorkEmail) {
-                        Write-PSLog -Message "aadUPN $entraIdUpn does not match bhrWorkEmail $bhrWorkEmail" -Severity Debug
-                        if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
-                          Write-PSLog -Message "Executing: Update-MgUser -UserId $entraIdObjectID -UserPrincipalName $bhrWorkEmail" -Severity Debug
-                          try {
-                            Invoke-WithRetry -Operation "Update UPN for: $bhrWorkEmail" -ScriptBlock {
-                              Update-MgUser -UserId $entraIdObjectID -UserPrincipalName $bhrWorkEmail -ErrorAction Stop
-                            }
-                            Write-PSLog -Message " Changed the current UPN:$entraIdUPN of $entraIdObjectID to $bhrWorkEmail." -Severity Warning
-                            Add-SignificantChange -Category UpnChanged -User $bhrWorkEmail -Detail "$entraIdUPN -> $bhrWorkEmail"
-                            Write-PSLog -Message "UPN change: $entraIdUPN -> $bhrWorkEmail" -Severity Information
-                            $params = @{
-                              Message         = @{
-                                Subject       = "Login changed for $bhrdisplayName"
-                                Body          = @{
-                                  ContentType = 'HTML'
-                                  Content     = "
-<p>Your email address was changed in the $CompanyName BambooHR. Your user account has been changed accordingly.</p><ui><li>Use your new user name: $bhrWorkEmail</li><li>Your password has not been modified.</li></ul><br/><p>$EmailSignature</p>"
-                                }
-                                ToRecipients  = @(
-                                  @{
-                                    EmailAddress = @{
-                                      Address = $bhrWorkEmail
-                                    }
-                                  }
-                                )
-                                CCRecipients  = @(
-                                  @{
-                                    EmailAddress = @{
-                                      Address = $bhrSupervisorEmail
-                                    }
-                                  }
-                                )
-                                BCCRecipients = @(
-                                  @{
-                                    EmailAddress = @{
-                                      Address = $NotificationEmailAddress
-                                    }
-                                  }
-                                )
-                              }
-                              SaveToSentItems = 'True'
-                            }
-
-                            Invoke-WithRetry -Operation 'Send email address change notification' -ScriptBlock {
-                              Send-MgUserMail -BodyParameter $params -UserId $Script:Config.Email.AdminEmailAddress -Verbose
-                            }
-
-                            New-AdaptiveCard {
-
-                              New-AdaptiveTextBlock -Text "Login changed for $bhrdisplayName" -HorizontalAlignment Center -Weight Bolder -Wrap
-                              New-AdaptiveTextBlock -Text "An email address was changed in the $($Script:Config.Azure.CompanyName) BambooHR. Your user account has been changed accordingly." -Wrap
-                              New-AdaptiveTextBlock -Text "The user should use the new user name: $bhrWorkEmail" -Wrap
-                              New-AdaptiveTextBlock -Text "The user's password has not been modified." -Wrap
-                            } -Uri $TeamsCardUri -Speak "Login changed for $bhrdisplayName"
-                          }
-                          catch {
-                            Write-PSLog -Message " Error changing UPN for $entraIdObjectID. `n Exception: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
-                            $error.Clear()
-                          }
-                        }
-                      }
-                    }
-
-                    # Create new employee account
-                    if ((-not $entraIdUpnObjDetails) -and (-not $entraIdEidObjDetails) -and ($bhrAccountEnabled -eq $true)) {
-                      Write-PSLog -Message "No Entra ID account exist but employee in bhr is $bhrAccountEnabled" -Severity Debug
-
-                      if ([string]::IsNullOrWhiteSpace($Script:Config.Azure.LicenseId) -eq $false) {
-
-                        Get-LicenseStatus -LicenseId $Script:Config.Azure.LicenseId -NewUser
-                      }
-
-                      $PasswordProfile = @{
-                        Password = (Get-NewPassword)
-                      }
-
-                      $error.clear()
-
-                      if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Create New User Account')) {
-                        # Create Entra ID account, as it doesn't have one, if user hire date is less than $DaysAhead days in the future, or is in the past
-                        Write-PSLog -Message "$bhrWorkEmail does not have an Entra ID account and hire date ($normalizedBhrHireDate) is less than $($Script:Config.Features.DaysAhead) days from now." -Severity Information
-
-                        Write-PSLog -Message "Executing New-MgUser -EmployeeId $bhremployeeNumber -Department $bhrDepartment -CompanyName $($Script:Config.Azure.CompanyName) -Surname $bhrlastName -GivenName $bhrfirstName -DisplayName $bhrdisplayName -AccountEnabled -Mail $bhrWorkEmail -OfficeLocation $bhrOfficeLocation `
-                        -EmployeeHireDate $normalizedBhrHireDate -UserPrincipalName $bhrWorkEmail -PasswordProfile $PasswordProfile -JobTitle $bhrjobTitle -MailNickname $(Get-MailNicknameFromEmail -EmailAddress $bhrWorkEmail) -UsageLocation $($Script:Config.Azure.UsageLocation) -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged }" -Severity Debug
-
-                        $user = Invoke-WithRetry -Operation "Create new user: $bhrWorkEmail" -ScriptBlock {
-                          New-MgUser -EmployeeId $bhrEmployeeNumber -Department $bhrDepartment -CompanyName $Script:Config.Azure.CompanyName -Surname $bhrlastName -GivenName $bhrfirstName -DisplayName $bhrdisplayName `
-                            -AccountEnabled -Mail $bhrWorkEmail -OfficeLocation $bhrOfficeLocation -EmployeeHireDate $normalizedBhrHireDate -UserPrincipalName $bhrWorkEmail -PasswordProfile $PasswordProfile `
-                            -JobTitle $bhrjobTitle -MailNickname (Get-MailNicknameFromEmail -EmailAddress $bhrWorkEmail) `
-                            -UsageLocation $UsageLocation -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged }
-                        }
-
-                        # Did the account get created?
-                        if ($null -eq $user) {
-                          Write-PSLog -Message "Error creating Entra ID account for $bhrWorkEmail. `nException: $($Error.exception) `nTarget object: $($error.TargetObject) `nDetails: $($error.ErrorDetails) `nStackTrace: $($error.ScriptStackTrace)" -Severity Error
-                          Write-PSLog -Message "Account $bhrWorkEmail creation failed. New-Mguser cmdlet returned error. `n $($error | Select-Object *)"
-
-                          # Track critical error for summary report
-                          $errorSummary.TotalErrors++
-                          $errorSummary.CriticalErrors += "User creation failed: $bhrWorkEmail - $($Error.exception.Message)"
-                          $errorType = 'UserCreation'
-                          if (-not $errorSummary.ErrorsByType.ContainsKey($errorType)) {
-                            $errorSummary.ErrorsByType[$errorType] = 0
-                          }
-                          $errorSummary.ErrorsByType[$errorType]++
-                          $errorSummary.ErrorsByUser[$bhrWorkEmail] = "Failed to create user: $($Error.exception.Message)"
-
-                          $params = @{
-                            Message         = @{
-                              Subject      = "BhrEntraSync error: User creation automation $bhrdisplayName"
-                              Body         = @{
-                                ContentType = 'html'
-                                Content     = "<p>Hello,</p><br/><p>Account creation for user: $bhrWorkEmail has failed. Please check the log: $logFileName for further details.`
-                                         The error information is  below. <ul><li>Error Message: $($error.Exception.Message)</li><li>Error Category: $($error.CategoryInfo)</li><li>Error ID: $($error.FullyQualifiedErrorId)</li><li>Stack: $($error.ScriptStackTrace)</li></ul></p><p>$EmailSignature</p>"
-                              }
-                              ToRecipients = @(
-                                @{
-                                  EmailAddress = @{
-                                    Address = $HelpDeskEmailAddress
-                                  }
-                                }
-                              )
-                              CCRecipients = @(
-                                @{
-                                  EmailAddress = @{
-                                    Address = $NotificationEmailAddress
-                                  }
-                                }
-                              )
-                            }
-                            SaveToSentItems = 'True'
-                          }
-
-                          # Send Mail Message parameters definition closure
-                          Invoke-WithRetry -Operation 'Send user creation error notification' -ScriptBlock {
-                            Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress -Verbose
-                          }
-
-                          New-AdaptiveCard {
-
-                            New-AdaptiveTextBlock -Text "Account creation for user: $bhrWorkEmail failed." -HorizontalAlignment Center -Weight Bolder -Wrap
-                            New-AdaptiveTextBlock -Text "Error Message: $($error.Exception.Message)" -Wrap
-                            New-AdaptiveTextBlock -Text "Error Category: $($error.CategoryInfo)" -Wrap
-                            New-AdaptiveTextBlock -Text "Error ID: $($error.FullyQualifiedErrorId)" -Wrap
-                            New-AdaptiveTextBlock -Text "Stack: $($error.ScriptStackTrace)" -Wrap
-                          } -Uri $TeamsCardUri -Speak 'BHR-Sync Account Creation Error'
-                        }
-                        else {
-                          Write-PSLog -Message "Entra ID account for $bhrWorkEmail created." -Severity Information
-                          Write-PSLog -Message "Created new user: $bhrWorkEmail" -Severity Information
-                          Add-SignificantChange -Category Created -User $bhrWorkEmail -Detail $bhrDisplayName
-
-                          # Since we are setting up a new account lets use the image from the BambooHR profile and
-                          # add it to the Entra ID account
-                          Write-PSLog -Message 'Retrieving user photo from BambooHR...' -Severity Information
-                          $bhrEmployeePhotoUri = "$($bhrRootUri)/employees/$bhrEmployeeId/photo/large"
-                          $profilePicPath = Join-Path -Path $env:temp -ChildPath "bhr-$($bhrEmployeeId).jpg"
-                          Remove-Item -Path $profilePicPath -ErrorAction SilentlyContinue -Force | Out-Null
-                          Write-PSLog -Message "Executing: Invoke-RestMethod -Uri $bhrRep -Method POST -Headers $headers -ContentType 'application/json' -OutFile $profilePicPath" -Severity Debug
-                          $null = Invoke-RestMethod -Uri $bhrEmployeePhotoUri -Method GET -Headers $headers -ContentType 'application/json' -OutFile $profilePicPath -ErrorAction SilentlyContinue | Out-Null
-
-                          Write-PSLog 'Updating user account with BambooHR profile picture...' -Severity Information
-                          $photoUploadUser = $null
-                          if ((Test-Path $profilePicPath -PathType Leaf -ErrorAction SilentlyContinue) -eq
-                            $false -and (Test-Path $DefaultProfilePicPath)) {
-                            $profilePicPath = $DefaultProfilePicPath
-                          }
-
-                          if (Test-Path $profilePicPath -PathType Leaf -ErrorAction SilentlyContinue) {
-                            $userAvailableForPhoto = Wait-ForCondition -Operation "Wait for newly created user $bhrWorkEmail before photo upload" -TimeoutSeconds $Script:Config.Runtime.OperationTimeoutSeconds -PollIntervalSeconds $Script:Config.Runtime.RetryDelaySeconds -Condition {
-                              $photoUploadUser = Get-MgUser -UserId $bhrWorkEmail -ErrorAction Stop
-                              return ($null -ne $photoUploadUser) -and (-not [string]::IsNullOrWhiteSpace($photoUploadUser.Id))
-                            }
-
-                            if ($userAvailableForPhoto) {
-                              Write-PSLog "Executing: Set-MgUserPhotoContent -UserId $($photoUploadUser.Id) -InFile $profilePicPath" -Severity Debug
-                              try {
-                                Invoke-WithRetry -Operation "Set user photo for: $bhrWorkEmail" -ScriptBlock {
-                                  Set-MgUserPhotoContent -UserId $photoUploadUser.Id -InFile $profilePicPath -ErrorAction Stop
-                                }
-                              }
-                              catch {
-                                Write-PSLog -Message "Unable to update profile photo for $bhrWorkEmail. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Warning
-                              }
-                            }
-                            else {
-                              Write-PSLog -Message "Skipping profile photo upload for $bhrWorkEmail because the new user was not available within the configured timeout." -Severity Warning
-                            }
-                          }
-
-                          if ($profilePicPath -ne $DefaultProfilePicPath) {
-                            Write-PSLog "Executing: Remove-Item -Path $profilePicPath -ErrorAction SilentlyContinue | Out-Null" -Severity Debug
-                            #Remove-Item -Path $profilePicPath -ErrorAction SilentlyContinue -Force | Out-Null
-                          }
-
-                          if ([string]::IsNullOrWhiteSpace($bhrSupervisorEmail) -eq $false) {
-                            Write-PSLog -Message "Account $bhrWorkEmail successfully created." -Severity Information
-
-                            $managerUser = Get-ValidManagerUser -UserPrincipalName $bhrSupervisorEmail -Cache $performanceCache -TargetUser $bhrWorkEmail
-                            if ($managerUser) {
-                              $newManager = @{
-                                '@odata.id' = "https://graph.microsoft.com/v1.0/users/$($managerUser.Id)"
-                              }
-                              Start-Sleep -Seconds 8
-
-                              Write-PSLog -Message "Setting manager for newly created user $bhrWorkEmail." -Severity Debug
-                              Write-PSLog -Message "Executing: Set-MgUserManagerByRef -UserId $bhrWorkEmail -BodyParameter $NewManager" -Severity Debug
-                              Invoke-WithRetry -Operation "Set manager for new user: $bhrWorkEmail" -ScriptBlock {
-                                Set-MgUserManagerByRef -UserId $bhrWorkEmail -BodyParameter $NewManager
-                              }
-                              Add-SignificantChange -Category ManagerChanged -User $bhrWorkEmail -Detail "Manager: $bhrSupervisorEmail"
-                            }
-                            $params = @{
-                              Message         = @{
-                                Subject       = "User account created for: $bhrdisplayName"
-                                Body          = @{
-                                  ContentType = 'html'
-                                  Content     = "<br/><br/><p>A new user account was created for $bhrDisplayName with hire date of $bhrHireDate. </p><p> $($Script:Config.Email.WelcomeUserText) <ul><li>User name: $bhrWorkEmail</li><li>Password: $($PasswordProfile.Values)</li></ul><br/><p>$($Script:Config.Email.EmailSignature)</p>"
-                                }
-                                ToRecipients  = @(
-                                  @{
-                                    EmailAddress = @{
-                                      Address = $bhrSupervisorEmail
-                                    }
-                                  }
-                                )
-                                BCCRecipients = @(
-                                  @{
-                                    EmailAddress = @{
-                                      Address = $Script:Config.Email.NotificationEmailAddress
-                                    }
-                                  }
-                                )
-                              }
-                              SaveToSentItems = 'True'
-                            }
-                            Write-PSLog -Message "Sending $bhrSupervisorEmail new employee information for $bhrDisplayName in email." -Severity Information
-                            Invoke-WithRetry -Operation 'Send new employee notification to manager' -ScriptBlock {
-                              Send-MgUserMail -BodyParameter $params -UserId $Script:Config.Email.AdminEmailAddress -Verbose
-                            }
-
-                            New-AdaptiveCard {
-                              New-AdaptiveTextBlock -Text 'New user account created' -HorizontalAlignment Center -Weight Bolder -Wrap
-                              New-AdaptiveTextBlock -Text "User name: $bhrWorkEmail" -Wrap
-                              #New-AdaptiveTextBlock -Text "Password: $($PasswordProfile.Values)" -Wrap
-                            } -Uri $Script:Config.Features.TeamsCardUri -Speak "New User $bhrDisplayName account created"
-
-                            # Todo input these and an array and loop through only if needed.
-
-                            # Give a little time for the mailbox to be setup so that it can receive the message.
-                            Write-Output 'Waiting for mailbox setup before continuing'
-                            Start-Sleep -Seconds 180
-                            Write-Output 'Evaluating shared mailbox permissions'
-                            Invoke-SharedMailboxDelegationSync -Reason 'new user onboarding'
-
-                            $newUserWelcomeEmailParams = @{
-                              Message         = @{
-                                Subject       = "Welcome, $bhrFirstName!"
-                                Body          = @{
-                                  ContentType = 'html'
-                                  Content     = "<br/><br/><p>Welcome to $CompanyName, $bhrFirstName!</p><br/>`
-                              <p> $WelcomeUserText</p><br/>`
-                              $($Script:Config.Email.WelcomeLinksHtml)<p>$EmailSignature</p>"
-                                }
-                                ToRecipients  = @(
-                                  @{
-                                    EmailAddress = @{
-                                      Address = $bhrWorkEmail
-                                    }
-                                  }
-                                )
-                                BCCRecipients = @(
-                                  @{
-                                    EmailAddress = @{
-                                      Address = $bhrSupervisorEmail
-                                    }
-                                  }
-                                )
-                              }
-                              SaveToSentItems = 'True'
-                            }
-                            # Send Mail Message parameters definition closure
-                            Write-Output "Sending welcome email to $bhrWorkEmail"
-                            Invoke-WithRetry -Operation 'Send welcome email to new user' -ScriptBlock {
-                              Send-MgUserMail -BodyParameter $newUserWelcomeEmailParams -UserId $Script:Config.Email.AdminEmailAddress -Verbose
-                            }
-                          }
-                          else {
-                            $params = @{
-                              Message         = @{
-                                Subject      = "User creation automation: $bhrdisplayName"
-                                Body         = @{
-                                  ContentType = 'html'
-                                  Content     = "<br/><p>New employee user account created for $bhrDisplayName. No manager account is currently active for this account so this info is being sent to the default location.`
-                                        <p> $($Script:Config.Email.WelcomeUserText) <ul><li>User name: $bhrWorkEmail</li><li>Password: $($PasswordProfile.Values)</li></ul></p><p>$($Script:Config.Email.EmailSignature)</p>"
-                                }
-                                ToRecipients = @(
-                                  @{
-                                    EmailAddress = @{
-                                      Address = $Script:Config.Email.HelpDeskEmailAddress
-                                    }
-                                  }
-                                )
-                                CCRecipients = @(
-                                  @{
-                                    EmailAddress = @{
-                                      Address = $Script:Config.Email.NotificationEmailAddress
-                                    }
-                                  }
-                                )
-                              }
-                              SaveToSentItems = 'True'
-                            }
-                            Write-PSLog -Message 'Sending new employee information to default notification email because no manager was defined.' -Severity Information
-                            Invoke-WithRetry -Operation 'Send welcome email (no manager assigned)' -ScriptBlock {
-                              Send-MgUserMail -BodyParameter $params -UserId $Script:Config.Email.AdminEmailAddress -Verbose
-                            }
-
-                            New-AdaptiveCard {
-                              New-AdaptiveTextBlock -Text 'New user account created without an assigned manager' -HorizontalAlignment Center -Weight Bolder -Wrap
-                              New-AdaptiveTextBlock -Text 'No manager account is currently active for this account so this info is being sent to the default location.' -Wrap
-                              New-AdaptiveTextBlock -Text "User name: $bhrWorkEmail" -Wrap
-                              New-AdaptiveTextBlock -Text "Password: $($PasswordProfile.Values)" -Wrap
-                            } -Uri $Script:Config.Features.TeamsCardUri -Speak "New User $bhrDisplayName Account Created"
-                          }
-                        }
+                      if ($mobilePhoneUpdated) {
+                        Write-PSLog -Message "Work Mobile Phone for '$bhrWorkEmail' changed from '$entraIdMobilePhone' to '$bhrMobilePhone'" -Severity Debug
                       }
                     }
                   }
                   else {
-                    # If Hire Date is less than $days days in the future or in the past closure
-                    # The user account does not need to be created as it does not satisfy the condition of the HireDate being $($Script:Config.Features.DaysAhead) days or less in the future
-                    if ($bhrAccountEnabled) {
-                      Write-PSLog -Message "$bhrWorkEmail's hire date ($bhrHireDate) is more than $($Script:Config.Features.DaysAhead) days from now." -Severity Information
+                    Write-PSLog -Message "Mobile phone correct for $entraIdWorkEmail $entraIdMobilePhone" -Severity Debug
+                  }
+                }
+
+                # Compare user employee id with BambooHR and set it if not correct
+                if ($bhrEmployeeNumber.Trim() -ne $entraIdEmployeeNumber.Trim()) {
+                  Write-PSLog -Message " BHR employee number $bhrEmployeeNumber does not match Entra ID employee id $entraIdEmployeeNumber" -Severity Debug
+                  if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
+                    Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -EmployeeId $bhremployeeNumber  "
+                    # Setting the Employee ID found in BHR to the user in Entra ID
+                    try {
+                      Invoke-WithRetry -Operation "Update EmployeeId for: $bhrWorkEmail" -ScriptBlock {
+                        Update-MgUser -UserId $bhrWorkEmail -EmployeeId $bhremployeeNumber.Trim() -ErrorAction Stop
+                      }
+                      Write-PSLog -Message " The ID $bhremployeeNumber has been set to $bhrWorkEmail Entra ID account." -Severity Warning
                     }
-                    else {
-                      Write-PSLog -Message "$bhrWorkEmail has been terminated, the account will not be created." -Severity Debug
+                    catch {
+                      Write-PSLog -Message " Error changing EmployeeId. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
+                    }
+                  }
+                }
+                else {
+                  Write-PSLog -Message "Employee ID matched $bhrEmployeeNumber and $entraIdEmployeeNumber" -Severity Debug
+                }
+
+                # Set Company name to $($Script:Config.Azure.CompanyName)"
+                if ($entraIdCompanyName.Trim() -ne $Script:Config.Azure.CompanyName.Trim()) {
+                  Write-PSLog -Message "Entra ID company name '$entraIdCompany' does not match '$($Script:Config.Azure.CompanyName)'" -Severity Debug
+                  if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
+                    # Setting Company Name as $CompanyName to the employee, if not already set
+                    Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -CompanyName $($CompanyName.Trim())" -Severity Debug
+                    try {
+                      Invoke-WithRetry -Operation "Update CompanyName for: $bhrWorkEmail" -ScriptBlock {
+                        Update-MgUser -UserId $bhrWorkEmail -CompanyName $CompanyName.Trim() -ErrorAction Stop
+                      }
+                      Write-PSLog -Message " The $bhrWorkEmail employee Company attribute has been set to: $($Script:Config.Azure.CompanyName)." -Severity Information
+                    }
+                    catch {
+                      Write-PSLog -Message " Could not change the Company Name of $bhrWorkEmail. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
+                    }
+                  }
+                }
+                else {
+                  Write-PSLog -Message "Company name already matched in Entra ID and BHR $entraIdCompanyName" -Severity Debug
+                }
+
+                # Set LastModified from BambooHR to ExtensionAttribute1 in Entra ID
+
+                if ($upnExtensionAttribute1 -ne $bhrLastChanged) {
+                  # Setting the "lastchanged" attribute from BambooHR to ExtensionAttribute1 in Entra ID
+                  Write-PSLog -Message "Entra ID Extension Attribute '$upnExtensionAttribute1' does not match BHR last changed '$bhrLastChanged'" -Severity Debug
+                  Write-PSLog -Message 'Set LastModified from BambooHR to ExtensionAttribute1 in Entra ID' -Severity Debug
+
+                  if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
+                    Write-PSLog -Message "Executing: $null = Update-MgUser -UserId $bhrWorkEmail -OnPremisesExtensionAttributes @{extensionAttribute1 = '$bhrLastChanged' }" -Severity Debug
+                    # TODO: Does not work for on premises synched accounts. Not a problem with Entra ID native.
+                    try {
+                      $null = Update-MgUser -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrLastChanged } -UserId $bhrWorkEmail -ErrorAction Stop | Out-Null
+                      Write-PSLog -Message "$bhrWorkEmail LastChanged attribute set from '$upnExtensionAttribute1' to '$bhrlastChanged'." -Severity Information
+                    }
+                    catch {
                     }
                   }
 
-                  # Increment processed user counter for performance tracking
-                  $processedUserCount++
-                } # End ForEach-Object loop
+                }
+                else {
+                  Write-PSLog -Message "Attribute already matched last changed of $bhrLastChanged" -Severity Debug
+                }
               }
+            }
+          }
+          else {
+            Write-PSLog -Message "Entra ID user found for $bhrWorkEmail but no attribute sync needed (last changed dates match or user is suspended)" -Severity Debug
+
+            # This might not be needed anymore
+            $entraIdWorkEmail = ''
+            $entraIdJobTitle = ''
+            $entraIdDepartment = ''
+            $entraIdStatus = $false
+            $entraIdEmployeeNumber = ''
+            $entraIdSupervisorEmail = ''
+            $entraIdDisplayname = ''
+            $entraIdHireDate = ''
+            $entraIdFirstName = ''
+            $entraIdLastName = ''
+            $entraIdCompanyName = ''
+            $entraIdWorkPhone = ''
+            $entraIdOfficeLocation = ''
+          }
+
+          # Handle name changes
+          if (($entraIdEmployeeNumber2 -eq $bhremployeeNumber) -and ($historystatus -notlike '*inactive*') -and ($entraIdUpnObjDetails.id -eq $entraIdEidObjDetails.id)) {
+
+            $entraIdUPN = $entraIdEidObjDetails.UserPrincipalName
+            $entraIdObjectID = $entraIdEidObjDetails.id
+            $entraIdworkemail = $entraIdEidObjDetails.Mail
+            $entraIdemployeeNumber = $entraIdEidObjDetails.EmployeeID
+            $entraIddisplayname = $entraIdEidObjDetails.displayname
+            $entraIdfirstName = $entraIdEidObjDetails.GivenName
+            $entraIdlastName = $entraIdEidObjDetails.Surname
+
+            Write-PSLog -Message "Evaluating if Entra ID name change is required for $entraIdfirstName $entraIdlastName ($entraIddisplayname) `n`t Work Email: $entraIdWorkEmail UserPrincipalName: $entraIdUpn EmployeeId: $entraIdEmployeeNumber" -Severity Debug
+
+            # 3/31/2023 Is this required here or should it be handled after the name change or the next sync after the name change?
+            # Set LastModified from BambooHR to ExtensionAttribute1 in Entra ID
+            if ($EIDExtensionAttribute1 -ne $bhrlastChanged) {
+              if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
+
+                # Setting the "lastchanged" attribute from BambooHR to ExtensionAttribute1 in Entra ID
+                Write-PSLog -Message "Executing: Update-MgUser -UserId $entraIdObjectID -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged } " -Severity Debug
+                # This does not work for AD on premises synced accounts.
+                $null = Update-MgUser -UserId $entraIdObjectID -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged } -ErrorAction SilentlyContinue | Out-Null
+              }
+            }
+
+            # Change last name in Entra ID
+            if ($entraIdLastName -ne $bhrLastName) {
+              Write-PSLog -Message " Last name in Entra ID $entraIdLastName does not match in BHR $bhrLastName" -Severity Debug
+              Write-PSLog -Message " Changing the last name of $bhrWorkEmail from $entraIdLastName to $bhrLastName." -Severity Debug
+              if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
+                Write-PSLog -Message "Executing: Update-MgUser -UserId $entraIdObjectID -Surname $bhrLastName" -Severity Debug
+                try {
+                  Invoke-WithRetry -Operation "Update surname for: $bhrWorkEmail" -ScriptBlock {
+                    Update-MgUser -UserId $entraIdObjectID -Surname $bhrLastName -ErrorAction Stop
+                  }
+                  Write-PSLog -Message " Successfully changed the last name of $bhrWorkEmail from $entraIdLastName to $bhrLastName." -Severity Information
+                  Add-SignificantChange -Category NameChanged -User $bhrWorkEmail -Detail "Name: '$entraIdDisplayName' -> '$bhrDisplayName'"
+                  Write-PSLog -Message "Name change: $bhrWorkEmail" -Severity Information
+                }
+                catch {
+                  Write-PSLog -Message "Error changing Entra ID Last Name.`n`nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
+                }
+              }
+            }
+
+            # Change First Name in Entra ID
+            if ($entraIdfirstName -ne $bhrfirstName) {
+              Write-PSLog "Entra ID first name '$entraIdfirstName' is not equal to BHR first name '$bhrFirstName'" -Severity Debug
+              if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
+                Write-PSLog -Message "Executing: Update-MgUser -UserId $entraIdObjectID -GivenName $bhrFirstName" -Severity Debug
+                try {
+                  Invoke-WithRetry -Operation "Update given name for: $bhrWorkEmail" -ScriptBlock {
+                    Update-MgUser -UserId $entraIdObjectID -GivenName $bhrFirstName -ErrorAction Stop
+                  }
+                  Write-PSLog -Message " Successfully changed $entraIdObjectID first name from $entraIdFirstName to $bhrFirstName." -Severity Information
+                  Add-SignificantChange -Category NameChanged -User $bhrWorkEmail -Detail "Name: '$entraIdDisplayName' -> '$bhrDisplayName'"
+                  Write-PSLog -Message "Name change: $bhrWorkEmail" -Severity Information
+                }
+                catch {
+                  Write-PSLog -Message "Could not change the First Name of $entraIdObjectID. Error details below. `n`nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
+                }
+              }
+            }
+
+            # Change display name
+            if ($entraIdDisplayname -ne $bhrDisplayName) {
+              Write-PSLog -Message "Entra ID Display Name $entraIdDisplayname is not equal to BHR $bhrDisplayName" -Severity Debug
+              if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
+                Write-PSLog -Message "Executing: Update-MgUser -UserId $entraIdObjectID -DisplayName $bhrdisplayName" -Severity Debug
+                try {
+                  Invoke-WithRetry -Operation "Update display name for: $bhrWorkEmail" -ScriptBlock {
+                    Update-MgUser -UserId $entraIdObjectID -DisplayName $bhrdisplayName -ErrorAction Stop
+                  }
+                  Write-PSLog " Display name $entraIdDisplayName of $entraIdObjectID changed to $bhrDisplayName." -Severity Information
+                  Add-SignificantChange -Category NameChanged -User $bhrWorkEmail -Detail "Name: '$entraIdDisplayName' -> '$bhrDisplayName'"
+                  Write-PSLog -Message "Name change: $bhrWorkEmail" -Severity Information
+                }
+                catch {
+                  Write-PSLog -Message " Could not change the Display Name. Error details below. `n`nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
+                }
+              }
+            }
+
+            # Change Email Address
+            if ($entraIdWorkEmail -ne $bhrWorkEmail) {
+              Write-PSLog -Message "Entra ID work email $entraIdWorkEmail does not match BHR work email $bhrWorkEmail"
+              if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
+                Write-PSLog -Message "Executing: Update-MgUser -UserId $entraIdObjectID -Mail $bhrWorkEmail"
+                try {
+                  Invoke-WithRetry -Operation "Update mail for: $bhrWorkEmail" -ScriptBlock {
+                    Update-MgUser -UserId $entraIdObjectID -Mail $bhrWorkEmail -ErrorAction Stop
+                  }
+                  # Change Email Address error logging
+                  Write-PSLog "The current Email Address: $entraIdworkemail of $entraIdObjectID has been changed to $bhrWorkEmail." -Severity Warning
+                }
+                catch {
+                  Write-PSLog -Message "Error changing Email Address. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
+                }
+              }
+            }
+
+            # Change UserPrincipalName and send the details via email to the User
+            if ($entraIdUpn -ne $bhrWorkEmail) {
+              Write-PSLog -Message "aadUPN $entraIdUpn does not match bhrWorkEmail $bhrWorkEmail" -Severity Debug
+              if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
+                Write-PSLog -Message "Executing: Update-MgUser -UserId $entraIdObjectID -UserPrincipalName $bhrWorkEmail" -Severity Debug
+                try {
+                  Invoke-WithRetry -Operation "Update UPN for: $bhrWorkEmail" -ScriptBlock {
+                    Update-MgUser -UserId $entraIdObjectID -UserPrincipalName $bhrWorkEmail -ErrorAction Stop
+                  }
+                  Write-PSLog -Message " Changed the current UPN:$entraIdUPN of $entraIdObjectID to $bhrWorkEmail." -Severity Warning
+                  Add-SignificantChange -Category UpnChanged -User $bhrWorkEmail -Detail "$entraIdUPN -> $bhrWorkEmail"
+                  Write-PSLog -Message "UPN change: $entraIdUPN -> $bhrWorkEmail" -Severity Information
+                  $params = @{
+                    Message         = @{
+                      Subject       = "Login changed for $bhrdisplayName"
+                      Body          = @{
+                        ContentType = 'HTML'
+                        Content     = "
+<p>Your email address was changed in the $CompanyName BambooHR. Your user account has been changed accordingly.</p><ui><li>Use your new user name: $bhrWorkEmail</li><li>Your password has not been modified.</li></ul><br/><p>$EmailSignature</p>"
+                      }
+                      ToRecipients  = @(
+                        @{
+                          EmailAddress = @{
+                            Address = $bhrWorkEmail
+                          }
+                        }
+                      )
+                      CCRecipients  = @(
+                        @{
+                          EmailAddress = @{
+                            Address = $bhrSupervisorEmail
+                          }
+                        }
+                      )
+                      BCCRecipients = @(
+                        @{
+                          EmailAddress = @{
+                            Address = $NotificationEmailAddress
+                          }
+                        }
+                      )
+                    }
+                    SaveToSentItems = 'True'
+                  }
+
+                  Invoke-WithRetry -Operation 'Send email address change notification' -ScriptBlock {
+                    Send-MgUserMail -BodyParameter $params -UserId $Script:Config.Email.AdminEmailAddress -Verbose
+                  }
+
+                  New-AdaptiveCard {
+
+                    New-AdaptiveTextBlock -Text "Login changed for $bhrdisplayName" -HorizontalAlignment Center -Weight Bolder -Wrap
+                    New-AdaptiveTextBlock -Text "An email address was changed in the $($Script:Config.Azure.CompanyName) BambooHR. Your user account has been changed accordingly." -Wrap
+                    New-AdaptiveTextBlock -Text "The user should use the new user name: $bhrWorkEmail" -Wrap
+                    New-AdaptiveTextBlock -Text "The user's password has not been modified." -Wrap
+                  } -Uri $TeamsCardUri -Speak "Login changed for $bhrdisplayName"
+                }
+                catch {
+                  Write-PSLog -Message " Error changing UPN for $entraIdObjectID. `n Exception: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
+                }
+              }
+            }
+          }
+
+          # Create new employee account
+          if ((-not $entraIdUpnObjDetails) -and (-not $entraIdEidObjDetails) -and ($bhrAccountEnabled -eq $true)) {
+            Write-PSLog -Message "No Entra ID account exist but employee in bhr is $bhrAccountEnabled" -Severity Debug
+
+            # Track the planned creation in significant changes (works in both normal and WhatIf mode)
+            Add-SignificantChange -Category Created -User $bhrWorkEmail -Detail $bhrDisplayName
+
+            if ([string]::IsNullOrWhiteSpace($Script:Config.Azure.LicenseId) -eq $false) {
+
+              Get-LicenseStatus -LicenseId $Script:Config.Azure.LicenseId -NewUser
+            }
+
+            $PasswordProfile = @{
+              Password = (Get-NewPassword)
+            }
+
+            if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Create New User Account')) {
+              # Create Entra ID account, as it doesn't have one, if user hire date is less than $DaysAhead days in the future, or is in the past
+              Write-PSLog -Message "$bhrWorkEmail does not have an Entra ID account and hire date ($normalizedBhrHireDate) is less than $($Script:Config.Features.DaysAhead) days from now." -Severity Information
+
+              # Build New-MgUser params — omit empty strings to avoid Graph API Request_BadRequest errors
+              $newUserParams = @{
+                EmployeeId                    = $bhrEmployeeNumber
+                CompanyName                   = $Script:Config.Azure.CompanyName
+                Surname                       = $bhrlastName
+                GivenName                     = $bhrfirstName
+                DisplayName                   = $bhrdisplayName
+                AccountEnabled                = $true
+                Mail                          = $bhrWorkEmail
+                EmployeeHireDate              = $normalizedBhrHireDate
+                UserPrincipalName             = $bhrWorkEmail
+                PasswordProfile               = $PasswordProfile
+                MailNickname                  = (Get-MailNicknameFromEmail -EmailAddress $bhrWorkEmail)
+                UsageLocation                 = $Script:Config.Azure.UsageLocation
+                OnPremisesExtensionAttributes = @{ extensionAttribute1 = $bhrlastChanged }
+              }
+              if (-not [string]::IsNullOrWhiteSpace($bhrDepartment)) { $newUserParams['Department'] = $bhrDepartment }
+              if (-not [string]::IsNullOrWhiteSpace($bhrjobTitle)) { $newUserParams['JobTitle'] = $bhrjobTitle }
+              if (-not [string]::IsNullOrWhiteSpace($bhrOfficeLocation)) { $newUserParams['OfficeLocation'] = $bhrOfficeLocation }
+
+              Write-PSLog -Message "Executing New-MgUser for $bhrWorkEmail with params: $($newUserParams.Keys -join ', ')" -Severity Debug
+
+              $user = Invoke-WithRetry -Operation "Create new user: $bhrWorkEmail" -ScriptBlock {
+                New-MgUser @newUserParams
+              }
+
+              # Did the account get created?
+              if ($null -eq $user) {
+                Write-PSLog -Message "Error creating Entra ID account for $bhrWorkEmail. `nException: $($Error[0].Exception) `nTarget object: $($error[0].TargetObject) `nDetails: $($error[0].ErrorDetails) `nStackTrace: $($error[0].ScriptStackTrace)" -Severity Error
+                Write-PSLog -Message "Account $bhrWorkEmail creation failed. New-MgUser cmdlet returned error." -Severity Error
+
+                # Track critical error for summary report
+                $errorSummary.TotalErrors++
+                $errorSummary.CriticalErrors += "User creation failed: $bhrWorkEmail - $($Error[0].Exception.Message)"
+                $errorType = 'UserCreation'
+                if (-not $errorSummary.ErrorsByType.ContainsKey($errorType)) {
+                  $errorSummary.ErrorsByType[$errorType] = 0
+                }
+                $errorSummary.ErrorsByType[$errorType]++
+                $errorSummary.ErrorsByUser[$bhrWorkEmail] = "Failed to create user: $($Error[0].Exception.Message)"
+
+                $params = @{
+                  Message         = @{
+                    Subject      = "BhrEntraSync error: User creation automation $bhrdisplayName"
+                    Body         = @{
+                      ContentType = 'html'
+                      Content     = "<p>Hello,</p><br/><p>Account creation for user: $bhrWorkEmail has failed. Please check the log for further details.`
+                                         The error information is  below. <ul><li>Error Message: $($error[0].Exception.Message)</li><li>Error Category: $($error[0].CategoryInfo)</li><li>Error ID: $($error[0].FullyQualifiedErrorId)</li><li>Stack: $($error[0].ScriptStackTrace)</li></ul></p><p>$($Script:Config.Email.EmailSignature)</p>"
+                    }
+                    ToRecipients = @(
+                      @{
+                        EmailAddress = @{
+                          Address = $HelpDeskEmailAddress
+                        }
+                      }
+                    )
+                    CCRecipients = @(
+                      @{
+                        EmailAddress = @{
+                          Address = $NotificationEmailAddress
+                        }
+                      }
+                    )
+                  }
+                  SaveToSentItems = 'True'
+                }
+
+                # Send Mail Message parameters definition closure
+                Invoke-WithRetry -Operation 'Send user creation error notification' -ScriptBlock {
+                  Send-MgUserMail -BodyParameter $params -UserId $AdminEmailAddress -Verbose
+                }
+
+                New-AdaptiveCard {
+
+                  New-AdaptiveTextBlock -Text "Account creation for user: $bhrWorkEmail failed." -HorizontalAlignment Center -Weight Bolder -Wrap
+                  New-AdaptiveTextBlock -Text "Error Message: $($error.Exception.Message)" -Wrap
+                  New-AdaptiveTextBlock -Text "Error Category: $($error.CategoryInfo)" -Wrap
+                  New-AdaptiveTextBlock -Text "Error ID: $($error.FullyQualifiedErrorId)" -Wrap
+                  New-AdaptiveTextBlock -Text "Stack: $($error.ScriptStackTrace)" -Wrap
+                } -Uri $TeamsCardUri -Speak 'BHR-Sync Account Creation Error'
+              }
+              else {
+                Write-PSLog -Message "Entra ID account for $bhrWorkEmail created." -Severity Information
+                Write-PSLog -Message "Created new user: $bhrWorkEmail" -Severity Information
+
+                # Since we are setting up a new account lets use the image from the BambooHR profile and
+                # add it to the Entra ID account
+                Write-PSLog -Message 'Retrieving user photo from BambooHR...' -Severity Information
+                $bhrEmployeePhotoUri = "$($bhrRootUri)/employees/$bhrEmployeeId/photo/large"
+                $profilePicPath = Join-Path -Path $env:temp -ChildPath "bhr-$($bhrEmployeeId).jpg"
+                Remove-Item -Path $profilePicPath -ErrorAction SilentlyContinue -Force | Out-Null
+                Write-PSLog -Message "Downloading profile photo from BambooHR for employee $bhrEmployeeId" -Severity Debug
+                $null = Invoke-RestMethod -Uri $bhrEmployeePhotoUri -Method GET -Headers $headers -ContentType 'application/json' -OutFile $profilePicPath -ErrorAction SilentlyContinue | Out-Null
+
+                Write-PSLog 'Updating user account with BambooHR profile picture...' -Severity Information
+                $photoUploadUser = $null
+                if ((Test-Path $profilePicPath -PathType Leaf -ErrorAction SilentlyContinue) -eq
+                  $false -and (Test-Path $DefaultProfilePicPath)) {
+                  $profilePicPath = $DefaultProfilePicPath
+                }
+
+                if (Test-Path $profilePicPath -PathType Leaf -ErrorAction SilentlyContinue) {
+                  $userAvailableForPhoto = Wait-ForCondition -Operation "Wait for newly created user $bhrWorkEmail before photo upload" -TimeoutSeconds $Script:Config.Runtime.OperationTimeoutSeconds -PollIntervalSeconds $Script:Config.Runtime.RetryDelaySeconds -Condition {
+                    $photoUploadUser = Get-MgUser -UserId $bhrWorkEmail -ErrorAction Stop
+                    return ($null -ne $photoUploadUser) -and (-not [string]::IsNullOrWhiteSpace($photoUploadUser.Id))
+                  }
+
+                  if ($userAvailableForPhoto) {
+                    # Re-fetch in outer scope — the assignment inside the Wait-ForCondition scriptblock is local to that scriptblock
+                    $photoUploadUser = Get-MgUser -UserId $bhrWorkEmail -ErrorAction SilentlyContinue
+                    Write-PSLog "Executing: Set-MgUserPhotoContent -UserId $($photoUploadUser.Id) -InFile $profilePicPath" -Severity Debug
+                    try {
+                      Invoke-WithRetry -Operation "Set user photo for: $bhrWorkEmail" -ScriptBlock {
+                        Set-MgUserPhotoContent -UserId $photoUploadUser.Id -InFile $profilePicPath -ErrorAction Stop
+                      }
+                    }
+                    catch {
+                      Write-PSLog -Message "Unable to update profile photo for $bhrWorkEmail. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Warning
+                    }
+                  }
+                  else {
+                    Write-PSLog -Message "Skipping profile photo upload for $bhrWorkEmail because the new user was not available within the configured timeout." -Severity Warning
+                  }
+                }
+
+                if ($profilePicPath -ne $DefaultProfilePicPath) {
+                  Write-PSLog "Cleaning up temporary profile photo: $profilePicPath" -Severity Debug
+                  Remove-Item -Path $profilePicPath -ErrorAction SilentlyContinue -Force | Out-Null
+                }
+
+                if ([string]::IsNullOrWhiteSpace($bhrSupervisorEmail) -eq $false) {
+                  Write-PSLog -Message "Account $bhrWorkEmail successfully created." -Severity Information
+
+                  $managerUser = Get-ValidManagerUser -UserPrincipalName $bhrSupervisorEmail -Cache $performanceCache -TargetUser $bhrWorkEmail
+                  if ($managerUser) {
+                    $newManager = @{
+                      '@odata.id' = "https://graph.microsoft.com/v1.0/users/$($managerUser.Id)"
+                    }
+                    Start-Sleep -Seconds 8
+
+                    Write-PSLog -Message "Setting manager for newly created user $bhrWorkEmail." -Severity Debug
+                    Write-PSLog -Message "Executing: Set-MgUserManagerByRef -UserId $bhrWorkEmail -BodyParameter $NewManager" -Severity Debug
+                    Invoke-WithRetry -Operation "Set manager for new user: $bhrWorkEmail" -ScriptBlock {
+                      Set-MgUserManagerByRef -UserId $bhrWorkEmail -BodyParameter $NewManager
+                    }
+                    Add-SignificantChange -Category ManagerChanged -User $bhrWorkEmail -Detail "Manager: $bhrSupervisorEmail"
+                  }
+                  $params = @{
+                    Message         = @{
+                      Subject       = "User account created for: $bhrdisplayName"
+                      Body          = @{
+                        ContentType = 'html'
+                        Content     = "<br/><br/><p>A new user account was created for $bhrDisplayName with hire date of $bhrHireDate. </p><p> $($Script:Config.Email.WelcomeUserText) <ul><li>User name: $bhrWorkEmail</li><li>Password: $($PasswordProfile.Values)</li></ul><br/><p>$($Script:Config.Email.EmailSignature)</p>"
+                      }
+                      ToRecipients  = @(
+                        @{
+                          EmailAddress = @{
+                            Address = $bhrSupervisorEmail
+                          }
+                        }
+                      )
+                      BCCRecipients = @(
+                        @{
+                          EmailAddress = @{
+                            Address = $Script:Config.Email.NotificationEmailAddress
+                          }
+                        }
+                      )
+                    }
+                    SaveToSentItems = 'True'
+                  }
+                  Write-PSLog -Message "Sending $bhrSupervisorEmail new employee information for $bhrDisplayName in email." -Severity Information
+                  Invoke-WithRetry -Operation 'Send new employee notification to manager' -ScriptBlock {
+                    Send-MgUserMail -BodyParameter $params -UserId $Script:Config.Email.AdminEmailAddress -Verbose
+                  }
+
+                  New-AdaptiveCard {
+                    New-AdaptiveTextBlock -Text 'New user account created' -HorizontalAlignment Center -Weight Bolder -Wrap
+                    New-AdaptiveTextBlock -Text "User name: $bhrWorkEmail" -Wrap
+                    #New-AdaptiveTextBlock -Text "Password: $($PasswordProfile.Values)" -Wrap
+                  } -Uri $Script:Config.Features.TeamsCardUri -Speak "New User $bhrDisplayName account created"
+
+                  # Todo input these and an array and loop through only if needed.
+
+                  # Wait for the mailbox to be provisioned before sending the welcome email.
+                  Write-PSLog -Message "Waiting for mailbox provisioning for $bhrWorkEmail before sending welcome email" -Severity Information
+                  $null = Wait-ForCondition -Operation "Mailbox provisioning for $bhrWorkEmail" -TimeoutSeconds 180 -PollIntervalSeconds 15 -Condition {
+                    $null -ne (Get-EXOMailbox -Anr $bhrWorkEmail -ErrorAction Stop)
+                  }
+                  Write-PSLog -Message 'Evaluating shared mailbox permissions' -Severity Information
+                  Invoke-SharedMailboxDelegationSync -Reason 'new user onboarding'
+
+                  $newUserWelcomeEmailParams = @{
+                    Message         = @{
+                      Subject       = "Welcome, $bhrFirstName!"
+                      Body          = @{
+                        ContentType = 'html'
+                        Content     = "<br/><br/><p>Welcome to $($Script:Config.Azure.CompanyName), $bhrFirstName!</p><br/>`
+                              $($Script:Config.Email.WelcomeUserText)`
+                              $($Script:Config.Email.WelcomeLinksHtml)$($Script:Config.Email.EmailSignature)"
+                      }
+                      ToRecipients  = @(
+                        @{
+                          EmailAddress = @{
+                            Address = $bhrWorkEmail
+                          }
+                        }
+                      )
+                      BCCRecipients = @(
+                        @{
+                          EmailAddress = @{
+                            Address = $bhrSupervisorEmail
+                          }
+                        }
+                      )
+                    }
+                    SaveToSentItems = 'True'
+                  }
+                  # Send Mail Message parameters definition closure
+                  Write-Output "Sending welcome email to $bhrWorkEmail"
+                  Invoke-WithRetry -Operation 'Send welcome email to new user' -ScriptBlock {
+                    Send-MgUserMail -BodyParameter $newUserWelcomeEmailParams -UserId $Script:Config.Email.AdminEmailAddress -Verbose
+                  }
+                }
+                else {
+                  $params = @{
+                    Message         = @{
+                      Subject      = "User creation automation: $bhrdisplayName"
+                      Body         = @{
+                        ContentType = 'html'
+                        Content     = "<br/><p>New employee user account created for $bhrDisplayName. No manager account is currently active for this account so this info is being sent to the default location.`
+                                        <p> $($Script:Config.Email.WelcomeUserText) <ul><li>User name: $bhrWorkEmail</li><li>Password: $($PasswordProfile.Values)</li></ul></p><p>$($Script:Config.Email.EmailSignature)</p>"
+                      }
+                      ToRecipients = @(
+                        @{
+                          EmailAddress = @{
+                            Address = $Script:Config.Email.HelpDeskEmailAddress
+                          }
+                        }
+                      )
+                      CCRecipients = @(
+                        @{
+                          EmailAddress = @{
+                            Address = $Script:Config.Email.NotificationEmailAddress
+                          }
+                        }
+                      )
+                    }
+                    SaveToSentItems = 'True'
+                  }
+                  Write-PSLog -Message 'Sending new employee information to default notification email because no manager was defined.' -Severity Information
+                  Invoke-WithRetry -Operation 'Send welcome email (no manager assigned)' -ScriptBlock {
+                    Send-MgUserMail -BodyParameter $params -UserId $Script:Config.Email.AdminEmailAddress -Verbose
+                  }
+
+                  New-AdaptiveCard {
+                    New-AdaptiveTextBlock -Text 'New user account created without an assigned manager' -HorizontalAlignment Center -Weight Bolder -Wrap
+                    New-AdaptiveTextBlock -Text 'No manager account is currently active for this account so this info is being sent to the default location.' -Wrap
+                    New-AdaptiveTextBlock -Text "User name: $bhrWorkEmail" -Wrap
+                  } -Uri $Script:Config.Features.TeamsCardUri -Speak "New User $bhrDisplayName Account Created"
+                }
+              }
+            }
+          }
+        }
+        else {
+          # If Hire Date is less than $days days in the future or in the past closure
+          # The user account does not need to be created as it does not satisfy the condition of the HireDate being $($Script:Config.Features.DaysAhead) days or less in the future
+          if ($bhrAccountEnabled) {
+            Write-PSLog -Message "$bhrWorkEmail's hire date ($bhrHireDate) is more than $($Script:Config.Features.DaysAhead) days from now." -Severity Information
+          }
+          else {
+            Write-PSLog -Message "$bhrWorkEmail has been terminated, the account will not be created." -Severity Debug
+          }
+        }
+
+        # Increment processed user counter for performance tracking
+        $processedUserCount++
+      } # End ForEach-Object loop
 
 #endregion Employee Processing Pipeline
 
@@ -4539,11 +4775,11 @@ DEVELOPER NOTE:
 This section only executes if:
 - NOT in WhatIf mode (changes were actually applied)
 - There is log content to report
-In WhatIf mode, changes are previewed but not applied.
+- Significant changes were recorded during the sync
+In WhatIf mode or no-change runs, the completion summary handles final status.
 #>
 
-$hasLogContent = ([string]::IsNullOrWhiteSpace($Script:logContent) -eq $false)
-$changesWereApplied = ((-not $WhatIfPreference) -and $hasLogContent)
+$changesWereApplied = Test-ShouldSendTeamsChangesCard -LogContent $Script:logContent -SignificantChanges $Script:SignificantChanges -WhatIfMode $WhatIfPreference
 
 if ($changesWereApplied) {
 
@@ -4713,6 +4949,9 @@ if (-not $changesWereApplied) {
 
         New-AdaptiveCard {
           New-AdaptiveTextBlock -Text 'BambooHR to Entra ID Sync Completed' -Wrap -Weight Bolder
+          if ($WhatIfPreference) {
+            New-AdaptiveTextBlock -Text 'Mode: WhatIf Preview (no changes applied)' -Wrap -Color Accent
+          }
           New-AdaptiveTextBlock -Text "Duration: $([math]::Round((New-TimeSpan -Start $Script:StartTime -End (Get-Date)).TotalMinutes, 2)) minutes" -Wrap
           if ($licenseInfo) {
             New-AdaptiveTextBlock -Text "Licenses: $($licenseInfo.ConsumedUnits) used / $($licenseInfo.AvailableUnits) available / $($licenseInfo.EnabledUnits) total" -Wrap
@@ -4778,7 +5017,12 @@ if (-not $changesWereApplied) {
   }
 }
 
-Invoke-SharedMailboxDelegationSync -Reason 'run completion'
+if (-not $WhatIfPreference) {
+  Invoke-SharedMailboxDelegationSync -Reason 'run completion'
+}
+else {
+  Write-PSLog -Message 'Skipping shared mailbox delegation sync: WhatIf mode is active.' -Severity Information
+}
 
 function Write-TerminatedAccountDeletionReminders {
   [CmdletBinding()]
@@ -4809,7 +5053,7 @@ function Write-TerminatedAccountDeletionReminders {
       }
       if ($users) {
         $users = $users | Where-Object {
-          ($_.EmployeeId -eq 'LVR') -or ($_.Department -eq 'Not Active') -or (-not [string]::IsNullOrWhiteSpace($_.CompanyName) -and $_.CompanyName -match 'OffboardingComplete')
+          ($_.EmployeeId -eq 'LVR') -or (-not [string]::IsNullOrWhiteSpace($_.CompanyName) -and $_.CompanyName -match 'OffboardingComplete')
         }
       }
     }

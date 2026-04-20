@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "type": "command",
+        "command": "pwsh -NoProfile -Command \"$input = $Input | Out-String; $match = [regex]::Match($input, '(?i)([^\\\"''\\s]+\\.ps1)'); if ($match.Success) { $f = $match.Groups[1].Value; if (Test-Path $f) { $results = Invoke-ScriptAnalyzer -Path $f -Severity Warning,Error; if ($results) { $results | Format-Table -Property Severity,RuleName,Line,Message -AutoSize | Out-String | Write-Host; exit 2 } else { Write-Host ('PSScriptAnalyzer: {0} is clean' -f $f) } } }\"",
+        "timeout": 30
+      }
+    ]
+  }
+}

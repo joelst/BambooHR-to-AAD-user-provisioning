@@ -30,21 +30,46 @@ This guide helps PowerShell developers understand the BambooHR to Azure AD user 
 1. **PowerShell**: Version 7+ recommended
 2. **Required Modules**:
    ```powershell
+   # Required
    Install-Module -Name Microsoft.Graph.Users -Scope CurrentUser
    Install-Module -Name Microsoft.Graph.Authentication -Scope CurrentUser
    Install-Module -Name Microsoft.Graph.Identity.DirectoryManagement -Scope CurrentUser
    Install-Module -Name Microsoft.Graph.Identity.SignIns -Scope CurrentUser
+   Install-Module -Name Microsoft.Graph.Groups -Scope CurrentUser
+   Install-Module -Name Microsoft.Graph.Calendar -Scope CurrentUser
+   Install-Module -Name Microsoft.Graph.Files -Scope CurrentUser
    Install-Module -Name ExchangeOnlineManagement -Scope CurrentUser
    Install-Module -Name PSTeams -Scope CurrentUser
+
+   # Optional (for full offboarding — script degrades gracefully without these)
+   Install-Module -Name Microsoft.Graph.DeviceManagement -Scope CurrentUser
+   Install-Module -Name Microsoft.Graph.DeviceManagement.Enrollment -Scope CurrentUser
+   Install-Module -Name Microsoft.Graph.Applications -Scope CurrentUser
    ```
 
 ### Azure Requirements
-- Azure Automation Account with Managed Identity
-- BambooHR API key and access
-- Microsoft Graph API permissions:
-  - `User.ReadWrite.All`
-  - `Directory.ReadWrite.All`
-  - `Mail.Send`
+- Azure Automation Account with **system-assigned** Managed Identity (not user-assigned)
+- BambooHR API key and access (stored as an encrypted Automation variable)
+- Microsoft Graph API permissions (see [Add-ManagedIdentityPermissions.ps1](./Add-ManagedIdentityPermissions.ps1) for the full list):
+  - `User.ReadWrite.All`, `User.EnableDisableAccount.All`, `UserAuthenticationMethod.ReadWrite.All`
+  - `Group.ReadWrite.All`, `GroupMember.ReadWrite.All`
+  - `Directory.ReadWrite.All`, `Organization.Read.All`, `Application.Read.All`
+  - `Mail.Send`, `Mail.ReadWrite`, `MailboxSettings.ReadWrite`, `Calendars.ReadWrite`
+  - `Device.ReadWrite.All`, `DeviceManagementManagedDevices.ReadWrite.All`, `DeviceManagementServiceConfig.ReadWrite.All`
+  - `Files.ReadWrite.All`
+- Exchange Online `Exchange.ManageAsApp` application role (and optionally the **Exchange Administrator** Entra role for mailbox delegation)
+
+### Managed Identity Security
+
+> **The managed identity holds broad permissions. Protect the Automation Account as a Tier 0 asset.**
+
+- **System-assigned only** — the identity is deleted when the Automation Account is deleted, preventing orphaned privileged identities.
+- **Restrict RBAC** on the Automation Account to privileged administrators. Use `Automation Contributor` for runbook editors, `Automation Operator` for job execution only, and `Reader` for auditors. Do not assign broader roles.
+- **Use Azure PIM** for just-in-time elevation to Automation Account roles where possible.
+- **Audit regularly** — enable Diagnostic Settings to Log Analytics and review the managed identity's app role assignments in Entra ID periodically.
+- **Conditional Access for workload identities** — if available in your tenant, restrict the managed identity to the Automation Account's outbound IP ranges.
+
+See the [Security Hardening](./README.md#security-hardening) section in the README for the full checklist.
 
 ---
 
@@ -81,6 +106,9 @@ This guide helps PowerShell developers understand the BambooHR to Azure AD user 
 3. **Performance Caching**: Reduces API calls by 30-50%
 4. **Error Tracking**: Comprehensive error collection and reporting
 5. **Logging**: Multi-destination logging (console, file, email)
+6. **Two entry points**:
+   - `Start-BambooHRUserProvisioning.ps1` for scheduled reconciliation
+   - `Start-BambooHrWebhookSync.ps1` for BambooHR webhook-triggered targeted sync
 
 ---
 
@@ -102,6 +130,8 @@ This guide helps PowerShell developers understand the BambooHR to Azure AD user 
 
 3. Retrieve Employee Data
    ├─ Call BambooHR API
+   ├─ Scheduled runbook: broad delta/full retrieval
+   ├─ Webhook runbook: targeted employee retrieval from webhook IDs
    ├─ Filter by company email domain
    └─ Sort by last name
 
@@ -120,6 +150,12 @@ This guide helps PowerShell developers understand the BambooHR to Azure AD user 
    ├─ Email notifications
    └─ Teams adaptive cards
 ```
+
+### Webhook entry point notes
+
+`Start-BambooHrWebhookSync.ps1` is designed to accept Azure Automation `WebhookData`, extract BambooHR employee IDs from the posted JSON, optionally validate the BambooHR HMAC signature, and then run a targeted sync for only those employees.
+
+The webhook path should stay focused on employee-level lifecycle work and avoid tenant-wide reconciliation tasks that are better suited to the scheduled runbook.
 
 ### Detailed Employee Processing Flow
 

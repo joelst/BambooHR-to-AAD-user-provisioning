@@ -15,21 +15,18 @@ What is different about this from the original?
 5. I've got a _little OCD_ when it comes to silly things like variable names. Although I _really_ tried to fight my irrational desire to change them, I failed. No, there wasn't anything wrong with the original ones, just try explaining that to my OCD.
 6. If you use this, please star the repo or reach out to me.
 
-## Customization via Azure Automation variable
+## Customization via Azure Automation variables
 
 To avoid maintaining a personalized script, provide overrides in an Automation variable named `BHR_CustomizationsJson`. The script loads this JSON and applies overrides at runtime.
 
-### Example JSON to match _Start-BambooHRUserProvisioning.ps1
+### Example JSON to match Start-BambooHRUserProvisioning.ps1
 
 ```json
 {
   "DaysToKeepAccountsAfterTermination": 14,
   "MailboxDelegationParams": [
-    { "Group": "CG-SharedMailboxDelegatedAccessScheduling", "DelegateMailbox": "Scheduling" },
-    { "Group": "CG-SharedMailboxDelegatedAccessCustomerCare", "DelegateMailbox": "CustomerCare" },
-    { "Group": "CG-SharedMailboxDelegatedAccessSalesLeads", "DelegateMailbox": "Lead" },
-    { "Group": "CG-SharedMailboxDelegatedAccessSocial", "DelegateMailbox": "Social" },
-    { "Group": "CG-SharedMailboxDelegatedAccessJuneCommerce", "DelegateMailbox": "junec" }
+    { "Group": "CG-SharedMailboxAccessCustomerCare", "DelegateMailbox": "CustomerCare" },
+    { "Group": "CG-SharedMailboxAccessSalesLeads", "DelegateMailbox": "SalesLeads" },
   ]
 }
 ```
@@ -97,7 +94,7 @@ This section will keep track of changes made over time.
 - Added details to the Teams chat message about the changes made during the script execution.
 - Added `DaysToKeepAccountsAfterTermination` parameter. When a user has been disabled past this set days, a notification will be sent that the account needs to be deleted. Also now update the EmployeeLeaveDateTime in Entra ID to make this work better.
 
-> Note: In the future, I will probably add an option to automatically delete the account after this time. Let me know if you want this now!
+> Note: In the future, we may implement automatically deletion of accounts after this time. Need to make sure this is solid before trying to implement it.
 
 - Remove user location information on termination to ensure the accounts gets removed from all groups.
 
@@ -204,17 +201,11 @@ This section will keep track of changes made over time.
 
 ## Future ideas
 
-If you have suggestions or questions, feel free to reach out.
-
-- Add off boarding steps for things like:
-  - One Drive for Business data access
-  - Transfer group ownership
-  - Deleting disabled accounts after suitable waiting period.
-  - Other suggestions
+If you have suggestions or questions, feel free to create an Issue or a Pull Request for review.
 
 ## Getting started
 
-This is part of BambooHR and Entra ID integration process. This will ensure employees have Entra ID accounts. This does not create or update on-premises Active Directory Domain Services accounts.
+This is part of BambooHR and Entra ID integration process. This will ensure employees have Entra ID accounts. This **does not create** or update on premises Active Directory Domain Services accounts.
 
 ### Prerequisites
 
