@@ -2,11 +2,11 @@
 
 ## Runbook responsibilities
 
-| Runbook | Normal trigger | Purpose |
-| --- | --- | --- |
-| `Start-BambooHRUserProvisioning.ps1` | Hourly schedule + weekly full sync | Reconciliation safety net and primary scheduled lifecycle engine |
-| `Start-BambooHrWebhookSync.ps1` | Azure Automation webhook | Fast, employee-targeted reaction path for BambooHR changes |
-| `Update-AzureAutomationRuntimeEnvironmentPSModules.ps1` | Weekly schedule | Keeps the PowerShell 7.4 runtime environment packages current |
+| Runbook                                                 | Normal trigger                     | Purpose                                                          |
+| ------------------------------------------------------- | ---------------------------------- | ---------------------------------------------------------------- |
+| `Start-BambooHRUserProvisioning.ps1`                    | Hourly schedule + weekly full sync | Reconciliation safety net and primary scheduled lifecycle engine |
+| `Start-BambooHrWebhookSync.ps1`                         | Azure Automation webhook           | Fast, employee-targeted reaction path for BambooHR changes       |
+| `Update-AzureAutomationRuntimeEnvironmentPSModules.ps1` | Weekly schedule                    | Keeps the PowerShell 7.4 runtime environment packages current    |
 
 ## Recommended operating cadence
 
@@ -22,6 +22,13 @@ Use the scheduled runbook for routine reconciliation. This catches:
 
 Run a weekly `FullSync = $true` schedule as the backstop for anything delta logic missed.
 
+If you need to repair attribute drift even when BambooHR `lastChanged` did not move, run a targeted maintenance window with:
+
+- `FullSync = $true`
+- `ForceActiveUserAttributeRecheck = $true`
+
+This forces active-user attribute comparisons to run even when `extensionAttribute1` matches BambooHR `lastChanged`.
+
 ### Weekly runtime package maintenance
 
 Keep the runtime package update runbook on a weekly schedule and review package drift in a change window when possible.
@@ -31,7 +38,7 @@ Keep the runtime package update runbook on a weekly schedule and review package 
 Review these items regularly:
 
 1. Recent Automation jobs and failure counts.
-2. Teams or email summaries for unusual spikes in creates, disables, or errors.
+2. Teams or email summaries for unusual spikes in creates, disables, errors, or manual deletions required.
 3. Runtime package update results.
 4. Entra managed identity role assignments after permission changes.
 5. Webhook usage if public access is enabled.
@@ -46,6 +53,16 @@ Use these signals first when diagnosing a problem:
 - `errorSummary` details in the job log
 
 The Teams summary now reports tracked significant changes instead of generic log volume, so an empty change card is no longer expected on routine no-op runs.
+
+## Overdue deletion warnings
+
+When the scheduled reconciliation run finds disabled offboarded accounts older than `DaysToKeepAccountsAfterTermination`, the Teams summary includes a `Manual deletions required` section.
+
+1. Confirm the account has satisfied your retention window before deleting it from Entra ID.
+2. Verify `employeeLeaveDateTime` or the `OffboardingComplete` marker matches the intended termination date.
+3. If the account is intentionally retained longer, update `DaysToKeepAccountsAfterTermination` or document the exception.
+
+Webhook-targeted runs skip this tenant-wide sweep; the warning is produced by the scheduled reconciliation runbook.
 
 ## Safe change windows
 

@@ -173,6 +173,11 @@ Default is 14. Ignored when -FullSync is specified.
 Bypass the ModifiedWithinDays filter and process all employees. Use this for periodic
 catch-all runs to ensure no changes are missed.
 
+.PARAMETER ForceActiveUserAttributeRecheck
+When set to $true, active users are still evaluated for attribute updates even when
+BambooHR lastChanged matches Entra extensionAttribute1. This is useful for repair
+runs that need to reconcile drifted attributes without requiring a BambooHR timestamp change.
+
 .PARAMETER WhatIfMode
 Enable WhatIf preview mode from Azure Automation. Use this bool parameter instead of
 the -WhatIf switch, which cannot be specified on Azure Automation runbook parameters.
@@ -314,6 +319,10 @@ param (
   [Parameter(HelpMessage = 'Bypass the ModifiedWithinDays filter and process all employees.')]
   [bool]
   $FullSync = $false,
+
+  [Parameter(HelpMessage = 'When true, active users are checked for attribute updates even when BambooHR lastChanged matches extensionAttribute1.')]
+  [bool]
+  $ForceActiveUserAttributeRecheck = $false,
 
   [Parameter(HelpMessage = 'Enable WhatIf preview mode in Azure Automation. Use this instead of the -WhatIf switch which is not supported in runbooks.')]
   [bool]
@@ -590,6 +599,10 @@ function Initialize-Configuration {
         if ($null -ne $custom.FullSync -and -not $fullSyncWasBound) {
           $script:FullSync = [bool]$custom.FullSync
         }
+        $forceActiveUserAttributeRecheckWasBound = ($null -ne $script:PSBoundParameters -and $script:PSBoundParameters.ContainsKey('ForceActiveUserAttributeRecheck'))
+        if ($null -ne $custom.ForceActiveUserAttributeRecheck -and -not $forceActiveUserAttributeRecheckWasBound) {
+          $script:ForceActiveUserAttributeRecheck = [bool]$custom.ForceActiveUserAttributeRecheck
+        }
         $whatIfModeWasBound = ($null -ne $script:PSBoundParameters -and $script:PSBoundParameters.ContainsKey('WhatIfMode'))
         if ($null -ne $custom.WhatIfMode -and -not $whatIfModeWasBound) {
           if ([bool]$custom.WhatIfMode) {
@@ -716,6 +729,7 @@ function Initialize-Configuration {
       DaysToKeepAccountsAfterTermination = $script:DaysToKeepAccountsAfterTermination
       ModifiedWithinDays                 = $script:ModifiedWithinDays
       FullSync                           = (& $toBool $script:FullSync)
+      ForceActiveUserAttributeRecheck    = (& $toBool $script:ForceActiveUserAttributeRecheck)
       TeamsCardUri                       = $script:TeamsCardUri
       DefaultProfilePicPath              = $script:DefaultProfilePicPath
       MailboxDelegationParams            = if ($script:MailboxDelegationParams.Count -eq 0) {
@@ -1229,7 +1243,10 @@ function Test-ShouldSyncExistingUser {
     [object]$EntraIdUpnObjDetails,
 
     [Parameter()]
-    [string]$BhrEmploymentStatus
+    [string]$BhrEmploymentStatus,
+
+    [Parameter()]
+    [bool]$ForceActiveUserAttributeRecheck = $false
   )
 
   $hasMatchingEmployeeId = $EntraIdEmployeeNumber -eq $EntraIdEmployeeNumberByEid
@@ -1248,12 +1265,15 @@ function Test-ShouldSyncExistingUser {
     $false
   }
   $needsOffboarding = ($BhrEmploymentStatus -like '*Terminated*') -and $entraIdEnabled -and $hasLookupResults
+  $isSuspended = ($BhrEmploymentStatus -like '*suspended*')
+  $isActiveForRecheck = (-not ($BhrEmploymentStatus -like '*Terminated*')) -and (-not $isSuspended)
+  $allowSameLastChangedForActive = $ForceActiveUserAttributeRecheck -and $isActiveForRecheck
 
   return $needsOffboarding -or (
     ($hasMatchingEmployeeId -or $hasMatchingUpn) -and
-    ($BhrLastChanged -ne $UpnExtensionAttribute1) -and
+    (($BhrLastChanged -ne $UpnExtensionAttribute1) -or $allowSameLastChangedForActive) -and
     $hasLookupResults -and
-    ($BhrEmploymentStatus -notlike '*suspended*')
+    (-not $isSuspended)
   )
 }
 
@@ -2494,6 +2514,62 @@ function Get-NewPassword {
   return $password
 }
 
+function ConvertTo-TrimmedString {
+  <#
+        .SYNOPSIS
+        Trim leading and trailing whitespace from string values.
+
+        .DESCRIPTION
+        Returns an empty string for null or whitespace-only input so downstream
+        Graph attribute comparisons and updates work with normalized values.
+
+        .PARAMETER value
+        String value to normalize.
+        #>
+  [CmdletBinding()]
+  [OutputType([string])]
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [string]$value
+  )
+
+  if ([string]::IsNullOrWhiteSpace($value)) {
+    return ''
+  }
+
+  return $value.Trim()
+}
+
+function ConvertTo-NormalizedDepartment {
+  <#
+        .SYNOPSIS
+        Normalize department strings for reliable comparisons and Graph updates.
+
+        .DESCRIPTION
+        Removes control characters, collapses repeated whitespace to single spaces,
+        and trims leading/trailing whitespace.
+
+        .PARAMETER value
+        Department value to normalize.
+        #>
+  [CmdletBinding()]
+  [OutputType([string])]
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [string]$value
+  )
+
+  if ([string]::IsNullOrWhiteSpace($value)) {
+    return ''
+  }
+
+  $cleaned = [regex]::Replace($value, '[\p{C}]', '')
+  $cleaned = $cleaned -replace '\s+', ' '
+  return $cleaned.Trim()
+}
+
 function ConvertTo-StandardName {
   <#
         .SYNOPSIS
@@ -3348,35 +3424,35 @@ $employees | Sort-Object -Property LastName |
     #>
 
     # Metadata fields
-    $bhrlastChanged = "$($_.lastChanged)"           # Last modified timestamp in BambooHR
-    $bhrHireDate = "$($_.hireDate)"                 # Employee hire date
-    $bhremployeeNumber = "$($_.employeeNumber)"     # Unique employee number
+    $bhrlastChanged = ConvertTo-TrimmedString $_.lastChanged           # Last modified timestamp in BambooHR
+    $bhrHireDate = ConvertTo-TrimmedString $_.hireDate                 # Employee hire date
+    $bhremployeeNumber = ConvertTo-TrimmedString $_.employeeNumber     # Unique employee number
     # Job title as listed in Bamboo HR
-    $bhrJobTitle = "$($_.jobTitle)"
-    # Department as listed in Bamboo HR (Graph API limit: 64 characters, no control chars)
-    $bhrDepartment = ([regex]::Replace("$($_.department)", '[\p{C}]', '')).Trim()
+    $bhrJobTitle = ConvertTo-TrimmedString $_.jobTitle
+    # Department as listed in Bamboo HR (Graph API limit: 64 characters)
+    $bhrDepartment = ConvertTo-NormalizedDepartment "$($_.department)"
     if ($bhrDepartment.Length -gt 64) {
       Write-PSLog -Message "Department value '$bhrDepartment' ($($bhrDepartment.Length) chars) exceeds 64-character Graph API limit for employee $($_.workEmail), truncating." -Severity Warning
       $bhrDepartment = $bhrDepartment.Substring(0, 64).TrimEnd()
     }
     # Supervisor email address as listed in Bamboo HR
-    $bhrSupervisorEmail = "$($_.supervisorEmail)"
+    $bhrSupervisorEmail = ConvertTo-TrimmedString $_.supervisorEmail
     # Work email address as listedin Bamboo HR
-    $bhrWorkEmail = "$($_.workEmail)"
+    $bhrWorkEmail = ConvertTo-TrimmedString $_.workEmail
     # Current status of the employee: Active, Terminated and if contains "Suspended" is in "maternity leave"
-    $bhrEmploymentStatus = "$($_.employmentHistoryStatus)"
-    $bhrEmployeeId = "$($_.id)"
+    $bhrEmploymentStatus = ConvertTo-TrimmedString $_.employmentHistoryStatus
+    $bhrEmployeeId = ConvertTo-TrimmedString $_.id
     # Translating user "status" from BambooHR to boolean, to match and compare with the Entra ID user account status
-    $bhrStatus = "$($_.status)"
+    $bhrStatus = ConvertTo-TrimmedString $_.status
     if ($bhrStatus -eq 'Inactive')
     { $bhrAccountEnabled = $False }
     if ($bhrStatus -eq 'Active')
     { $bhrAccountEnabled = $True }
-    $bhrOfficeLocation = "$($_.location)"
+    $bhrOfficeLocation = ConvertTo-TrimmedString $_.location
     $bhrPreferredName = ConvertTo-StandardName "$($_.preferredName)"
     $bhrWorkPhone = ConvertTo-PhoneNumber "$($_.workPhone)"
     $bhrMobilePhone = ConvertTo-PhoneNumber "$($_.mobilePhone)"
-    $bhrBestEmail = "$($_.bestEmail)"
+    $bhrBestEmail = ConvertTo-TrimmedString $_.bestEmail
     $bhrFirstName = ConvertTo-StandardName $_.firstName
     # First name of employee in Bamboo HR
     $bhrLastName = ConvertTo-StandardName $_.lastName
@@ -3467,21 +3543,21 @@ $employees | Sort-Object -Property LastName |
           }
 
           # Saving Entra ID attributes to be compared one by one with the details pulled from BambooHR
-          $entraIdWorkEmail = "$($entraIdUpnObjDetails.Mail)"
-          $entraIdJobTitle = "$($entraIdUpnObjDetails.JobTitle)"
-          $entraIdDepartment = "$($entraIdUpnObjDetails.Department)"
+          $entraIdWorkEmail = ConvertTo-TrimmedString "$($entraIdUpnObjDetails.Mail)"
+          $entraIdJobTitle = ConvertTo-TrimmedString "$($entraIdUpnObjDetails.JobTitle)"
+          $entraIdDepartment = ConvertTo-NormalizedDepartment "$($entraIdUpnObjDetails.Department)"
           [bool]$entraIdStatus = [bool]$entraIdUpnObjDetails.AccountEnabled
-          $entraIdEmployeeNumber = "$($entraIdUpnObjDetails.EmployeeId)"
-          $entraIdEmployeeNumber2 = "$($entraIdEidObjDetails.EmployeeId)"
-          $entraIdSupervisorEmail = "$(($entraIdUpnObjDetails |
+          $entraIdEmployeeNumber = ConvertTo-TrimmedString "$($entraIdUpnObjDetails.EmployeeId)"
+          $entraIdEmployeeNumber2 = ConvertTo-TrimmedString "$($entraIdEidObjDetails.EmployeeId)"
+          $entraIdSupervisorEmail = ConvertTo-TrimmedString "$(($entraIdUpnObjDetails |
             Select-Object @{Name = 'Manager'; Expression = { $_.Manager.AdditionalProperties.mail } }).Manager)"
-          $entraIdDisplayname = "$($entraIdUpnObjDetails.displayName)"
-          $entraIdFirstName = "$($entraIdUpnObjDetails.GivenName)"
-          $entraIdLastName = "$($entraIdUpnObjDetails.Surname)"
-          $entraIdCompanyName = "$($entraIdUpnObjDetails.CompanyName)"
+          $entraIdDisplayname = ConvertTo-StandardName "$($entraIdUpnObjDetails.displayName)"
+          $entraIdFirstName = ConvertTo-StandardName "$($entraIdUpnObjDetails.GivenName)"
+          $entraIdLastName = ConvertTo-StandardName "$($entraIdUpnObjDetails.Surname)"
+          $entraIdCompanyName = ConvertTo-TrimmedString "$($entraIdUpnObjDetails.CompanyName)"
           $entraIdWorkPhone = "$($entraIdUpnObjDetails.BusinessPhones)"
           $entraIdMobilePhone = "$($entraIdUpnObjDetails.MobilePhone)"
-          $entraIdOfficeLocation = "$($entraIdUpnObjDetails.OfficeLocation)"
+          $entraIdOfficeLocation = ConvertTo-TrimmedString "$($entraIdUpnObjDetails.OfficeLocation)"
 
           # Clean up phone info to make it easier to work with
           [string]$bhrWorkPhone = ConvertTo-PhoneNumber $bhrWorkPhone
@@ -3576,9 +3652,10 @@ $employees | Sort-Object -Property LastName |
                 -UpnExtensionAttribute1 $UpnExtensionAttribute1 `
                 -EntraIdEidObjDetails $entraIdEidObjDetails `
                 -EntraIdUpnObjDetails $entraIdUpnObjDetails `
-                -BhrEmploymentStatus $bhrEmploymentStatus) {
+                -BhrEmploymentStatus $bhrEmploymentStatus `
+                -ForceActiveUserAttributeRecheck $Script:Config.Features.ForceActiveUserAttributeRecheck) {
 
-              Write-PSLog -Message "$bhrWorkEmail is a valid Entra ID Account, with matching EmployeeId and UPN in Entra ID and BambooHR, but different last modified date." -Severity Debug
+              Write-PSLog -Message "$bhrWorkEmail is a valid Entra ID account for attribute evaluation based on matching identity checks and sync mode." -Severity Debug
 
               # Check if user is active in BambooHR, and set the status of the account as it is in BambooHR
               # (active or inactive)
@@ -3912,7 +3989,7 @@ $employees | Sort-Object -Property LastName |
                 }
 
                 # Checking JobTitle if correctly set, if not, configure the JobTitle as set in BambooHR
-                if ($entraIdJobTitle.Trim() -ne $bhrJobTitle.Trim()) {
+                if ($entraIdJobTitle -ne $bhrJobTitle) {
                   Write-PSLog -Message "Entra ID Job Title $entraIdJobTitle does not match BHR Job Title $bhrJobTitle. Updating title." -Severity Debug
 
                   if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
@@ -3948,7 +4025,7 @@ $employees | Sort-Object -Property LastName |
                 }
 
                 # Checking department if correctly set, if not, configure the Department as set in BambooHR
-                if ($entraIdDepartment.Trim() -ne $bhrDepartment.Trim() -and -not [string]::IsNullOrWhiteSpace($bhrDepartment)) {
+                if ($entraIdDepartment -ne $bhrDepartment -and -not [string]::IsNullOrWhiteSpace($bhrDepartment)) {
                   Write-PSLog -Message "Entra ID department '$entraIdDepartment' does not match BambooHR department '$($bhrDepartment.Trim())'" -Severity Debug
                   if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
                     Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -Department $bhrDepartment" -Severity Debug
@@ -4044,13 +4121,13 @@ $employees | Sort-Object -Property LastName |
                 }
 
                 # Check and set the Office Location
-                if ($entraIdOfficeLocation.Trim() -ne $bhrOfficeLocation.Trim()) {
+                if ($entraIdOfficeLocation -ne $bhrOfficeLocation) {
                   Write-PSLog -Message "Entra ID office location '$entraIdOfficeLocation' does not match BHR hire data '$bhrOfficeLocation'" -Severity Debug
                   if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
-                    Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -OfficeLocation $($bhrOfficeLocation.Trim())" -Severity Debug
+                    Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -OfficeLocation $bhrOfficeLocation" -Severity Debug
                     try {
                       Invoke-WithRetry -Operation "Update OfficeLocation for: $bhrWorkEmail" -ScriptBlock {
-                        Update-MgUser -UserId $bhrWorkEmail -OfficeLocation $bhrOfficeLocation.Trim()
+                        Update-MgUser -UserId $bhrWorkEmail -OfficeLocation $bhrOfficeLocation
                       }
                       Write-PSLog -Message "Office location of $bhrWorkEmail in Entra ID changed from '$entraIdOfficeLocation' to '$bhrOfficeLocation'." -Severity Information
                     }
@@ -4181,14 +4258,14 @@ $employees | Sort-Object -Property LastName |
                 }
 
                 # Compare user employee id with BambooHR and set it if not correct
-                if ($bhrEmployeeNumber.Trim() -ne $entraIdEmployeeNumber.Trim()) {
+                if ($bhrEmployeeNumber -ne $entraIdEmployeeNumber) {
                   Write-PSLog -Message " BHR employee number $bhrEmployeeNumber does not match Entra ID employee id $entraIdEmployeeNumber" -Severity Debug
                   if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
                     Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -EmployeeId $bhremployeeNumber  "
                     # Setting the Employee ID found in BHR to the user in Entra ID
                     try {
                       Invoke-WithRetry -Operation "Update EmployeeId for: $bhrWorkEmail" -ScriptBlock {
-                        Update-MgUser -UserId $bhrWorkEmail -EmployeeId $bhremployeeNumber.Trim() -ErrorAction Stop
+                        Update-MgUser -UserId $bhrWorkEmail -EmployeeId $bhremployeeNumber -ErrorAction Stop
                       }
                       Write-PSLog -Message " The ID $bhremployeeNumber has been set to $bhrWorkEmail Entra ID account." -Severity Warning
                     }
@@ -4202,16 +4279,17 @@ $employees | Sort-Object -Property LastName |
                 }
 
                 # Set Company name to $($Script:Config.Azure.CompanyName)"
-                if ($entraIdCompanyName.Trim() -ne $Script:Config.Azure.CompanyName.Trim()) {
-                  Write-PSLog -Message "Entra ID company name '$entraIdCompany' does not match '$($Script:Config.Azure.CompanyName)'" -Severity Debug
+                $normalizedCompanyName = ConvertTo-TrimmedString $Script:Config.Azure.CompanyName
+                if ($entraIdCompanyName -ne $normalizedCompanyName) {
+                  Write-PSLog -Message "Entra ID company name '$entraIdCompanyName' does not match '$normalizedCompanyName'" -Severity Debug
                   if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
                     # Setting Company Name as $CompanyName to the employee, if not already set
-                    Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -CompanyName $($CompanyName.Trim())" -Severity Debug
+                    Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -CompanyName $normalizedCompanyName" -Severity Debug
                     try {
                       Invoke-WithRetry -Operation "Update CompanyName for: $bhrWorkEmail" -ScriptBlock {
-                        Update-MgUser -UserId $bhrWorkEmail -CompanyName $CompanyName.Trim() -ErrorAction Stop
+                        Update-MgUser -UserId $bhrWorkEmail -CompanyName $normalizedCompanyName -ErrorAction Stop
                       }
-                      Write-PSLog -Message " The $bhrWorkEmail employee Company attribute has been set to: $($Script:Config.Azure.CompanyName)." -Severity Information
+                      Write-PSLog -Message " The $bhrWorkEmail employee Company attribute has been set to: $normalizedCompanyName." -Severity Information
                     }
                     catch {
                       Write-PSLog -Message " Could not change the Company Name of $bhrWorkEmail. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
@@ -4269,13 +4347,13 @@ $employees | Sort-Object -Property LastName |
           # Handle name changes
           if (($entraIdEmployeeNumber2 -eq $bhremployeeNumber) -and ($historystatus -notlike '*inactive*') -and ($entraIdUpnObjDetails.id -eq $entraIdEidObjDetails.id)) {
 
-            $entraIdUPN = $entraIdEidObjDetails.UserPrincipalName
+            $entraIdUPN = ConvertTo-TrimmedString $entraIdEidObjDetails.UserPrincipalName
             $entraIdObjectID = $entraIdEidObjDetails.id
-            $entraIdworkemail = $entraIdEidObjDetails.Mail
-            $entraIdemployeeNumber = $entraIdEidObjDetails.EmployeeID
-            $entraIddisplayname = $entraIdEidObjDetails.displayname
-            $entraIdfirstName = $entraIdEidObjDetails.GivenName
-            $entraIdlastName = $entraIdEidObjDetails.Surname
+            $entraIdworkemail = ConvertTo-TrimmedString $entraIdEidObjDetails.Mail
+            $entraIdemployeeNumber = ConvertTo-TrimmedString $entraIdEidObjDetails.EmployeeID
+            $entraIddisplayname = ConvertTo-StandardName $entraIdEidObjDetails.displayname
+            $entraIdfirstName = ConvertTo-StandardName $entraIdEidObjDetails.GivenName
+            $entraIdlastName = ConvertTo-StandardName $entraIdEidObjDetails.Surname
 
             Write-PSLog -Message "Evaluating if Entra ID name change is required for $entraIdfirstName $entraIdlastName ($entraIddisplayname) `n`t Work Email: $entraIdWorkEmail UserPrincipalName: $entraIdUpn EmployeeId: $entraIdEmployeeNumber" -Severity Debug
 
@@ -4384,12 +4462,12 @@ $employees | Sort-Object -Property LastName |
 '@ -f $Script:Config.Azure.CompanyName, $bhrWorkEmail, $Script:Config.Email.EmailSignature
                   $params = @{
                     Message         = @{
-                      Subject       = "Login changed for $bhrdisplayName"
-                      Body          = @{
+                      Subject      = "Login changed for $bhrdisplayName"
+                      Body         = @{
                         ContentType = 'HTML'
                         Content     = $upnChangeBody
                       }
-                      ToRecipients  = @(
+                      ToRecipients = @(
                         @{
                           EmailAddress = @{
                             Address = $bhrWorkEmail
@@ -4462,9 +4540,10 @@ $employees | Sort-Object -Property LastName |
               Write-PSLog -Message "$bhrWorkEmail does not have an Entra ID account and hire date ($normalizedBhrHireDate) is less than $($Script:Config.Features.DaysAhead) days from now." -Severity Information
 
               # Build New-MgUser params — omit empty strings to avoid Graph API Request_BadRequest errors
+              $normalizedCompanyName = ConvertTo-TrimmedString $Script:Config.Azure.CompanyName
               $newUserParams = @{
                 EmployeeId                    = $bhrEmployeeNumber
-                CompanyName                   = $Script:Config.Azure.CompanyName
+                CompanyName                   = $normalizedCompanyName
                 Surname                       = $bhrlastName
                 GivenName                     = $bhrfirstName
                 DisplayName                   = $bhrdisplayName
@@ -4789,6 +4868,148 @@ This section only executes if:
 In WhatIf mode or no-change runs, the completion summary handles final status.
 #>
 
+function Get-TerminatedAccountsPendingDeletion {
+  [CmdletBinding()]
+  [OutputType([object[]])]
+  param(
+    [Parameter(Mandatory = $true)]
+    [int]
+    $DaysToKeepAccountsAfterTermination
+  )
+
+  if ($DaysToKeepAccountsAfterTermination -le 0) {
+    return @()
+  }
+
+  $nowUtc = (Get-Date).ToUniversalTime()
+  $cutoffUtc = $nowUtc.AddDays(-$DaysToKeepAccountsAfterTermination)
+  Write-PSLog -Message "Checking for terminated accounts older than $DaysToKeepAccountsAfterTermination days (manual deletion cutoff: $($cutoffUtc.ToString('yyyy-MM-dd')))" -Severity Debug
+
+  $users = $null
+  try {
+    $users = Invoke-WithRetry -Operation 'Query terminated accounts for deletion reminders' -ScriptBlock {
+      Get-MgUser -All -Filter "employeeId eq 'LVR'" -Property 'id,displayName,userPrincipalName,mail,employeeId,accountEnabled,employeeLeaveDateTime,department,companyName'
+    }
+  }
+  catch {
+    Write-PSLog -Message "Primary query failed (employeeId filter). Falling back to disabled-user scan: $($_.Exception.Message)" -Severity Warning
+    try {
+      $users = Invoke-WithRetry -Operation 'Fallback query disabled accounts for deletion reminders' -ScriptBlock {
+        Get-MgUser -All -Filter 'accountEnabled eq false' -Property 'id,displayName,userPrincipalName,mail,employeeId,accountEnabled,employeeLeaveDateTime,department,companyName'
+      }
+      if ($users) {
+        $users = $users | Where-Object {
+          ($_.EmployeeId -eq 'LVR') -or (-not [string]::IsNullOrWhiteSpace($_.CompanyName) -and $_.CompanyName -match 'OffboardingComplete')
+        }
+      }
+    }
+    catch {
+      Write-PSLog -Message "Fallback query also failed for deletion reminders: $($_.Exception.Message)" -Severity Warning
+      return @()
+    }
+  }
+
+  if (-not $users) {
+    return @()
+  }
+
+  $pendingDeletionAccounts = [System.Collections.Generic.List[object]]::new()
+
+  foreach ($u in $users) {
+    if ($u.AccountEnabled -ne $false) {
+      continue
+    }
+
+    $leaveUtc = $null
+    if ($u.EmployeeLeaveDateTime) {
+      try {
+        $leaveUtc = ([datetime]$u.EmployeeLeaveDateTime).ToUniversalTime()
+      }
+      catch {
+        $leaveUtc = $null
+      }
+    }
+
+    if (-not $leaveUtc -and -not [string]::IsNullOrWhiteSpace($u.CompanyName)) {
+      $leaveUtc = Get-OffboardingCompletionDateFromCompanyName -CompanyName $u.CompanyName
+    }
+
+    if (-not $leaveUtc -or $leaveUtc -gt $cutoffUtc) {
+      continue
+    }
+
+    $identifier = if ([string]::IsNullOrWhiteSpace($u.UserPrincipalName)) { $u.Mail } else { $u.UserPrincipalName }
+    if ([string]::IsNullOrWhiteSpace($identifier)) {
+      $identifier = $u.Id
+    }
+
+    $ageDays = [math]::Floor(($nowUtc - $leaveUtc).TotalDays)
+    $pendingDeletionAccounts.Add([PSCustomObject]@{
+        AgeDays          = $ageDays
+        DisplayName      = $u.DisplayName
+        Identifier       = $identifier
+        LeaveDateTimeUtc = $leaveUtc
+      }) | Out-Null
+  }
+
+  return $pendingDeletionAccounts.ToArray()
+}
+
+function Write-TerminatedAccountDeletionReminders {
+  [CmdletBinding()]
+  [OutputType([object[]])]
+  param(
+    [Parameter(Mandatory = $true)]
+    [int]
+    $DaysToKeepAccountsAfterTermination
+  )
+
+  $pendingDeletionAccounts = @(Get-TerminatedAccountsPendingDeletion -DaysToKeepAccountsAfterTermination $DaysToKeepAccountsAfterTermination)
+
+  foreach ($account in $pendingDeletionAccounts) {
+    Write-PSLog -Message "Manual deletion required: $($account.Identifier) (terminated $($account.AgeDays) days ago; leaveDateTime=$($account.LeaveDateTimeUtc.ToString('yyyy-MM-dd')))." -Severity Warning
+  }
+
+  return $pendingDeletionAccounts
+}
+
+function Add-TerminatedAccountDeletionReminderCardSection {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory = $true)]
+    [int]
+    $DaysToKeepAccountsAfterTermination,
+
+    [Parameter()]
+    [ValidateRange(1, 25)]
+    [int]
+    $MaxExamples = 8,
+
+    [Parameter()]
+    [AllowNull()]
+    [object[]]
+    $PendingDeletionAccounts
+  )
+
+  if ($null -eq $PendingDeletionAccounts -or $PendingDeletionAccounts.Count -eq 0) {
+    return
+  }
+
+  New-AdaptiveTextBlock -Text "`nManual deletions required: $($PendingDeletionAccounts.Count)" -Wrap -Weight Bolder -Color Warning
+  New-AdaptiveTextBlock -Text "These terminated accounts are still present after the $DaysToKeepAccountsAfterTermination-day retention window." -Wrap -Color Warning
+
+  $examples = @($PendingDeletionAccounts | Sort-Object AgeDays -Descending | Select-Object -First $MaxExamples)
+  foreach ($account in $examples) {
+    New-AdaptiveTextBlock -Text "- $($account.Identifier) ($($account.AgeDays) days; leaveDate=$($account.LeaveDateTimeUtc.ToString('yyyy-MM-dd')))" -Wrap
+  }
+
+  $remainingCount = $PendingDeletionAccounts.Count - $examples.Count
+  if ($remainingCount -gt 0) {
+    New-AdaptiveTextBlock -Text "... and $remainingCount more overdue account(s)" -Wrap -Size Small
+  }
+}
+
+$overdueTerminatedAccounts = @(Write-TerminatedAccountDeletionReminders -DaysToKeepAccountsAfterTermination $Script:Config.Features.DaysToKeepAccountsAfterTermination)
 $changesWereApplied = Test-ShouldSendTeamsChangesCard -LogContent $Script:logContent -SignificantChanges $Script:SignificantChanges -WhatIfMode $WhatIfPreference
 
 if ($changesWereApplied) {
@@ -4902,6 +5123,7 @@ if ($changesWereApplied) {
         else {
           New-AdaptiveTextBlock -Text "`nNo significant changes detected" -Wrap
         }
+        Add-TerminatedAccountDeletionReminderCardSection -DaysToKeepAccountsAfterTermination $Script:Config.Features.DaysToKeepAccountsAfterTermination -MaxExamples $maxExamples -PendingDeletionAccounts $overdueTerminatedAccounts
         New-AdaptiveTextBlock -Text "`nCompleted: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -Wrap -Size Small
       } -Uri $Script:Config.Features.TeamsCardUri -Speak 'BambooHR to Entra ID sync completed with changes applied'
       Write-PSLog 'Teams notification sent: Changes applied' -Severity Debug
@@ -4940,19 +5162,31 @@ if (-not $changesWereApplied) {
       $managerChangedCount = $Script:SignificantChanges.ManagerChanged.Count
       $updatedMajorCount = $Script:SignificantChanges.UpdatedMajor.Count
       $hasSignificantChanges = ($createdCount + $disabledCount + $nameChangedCount + $upnChangedCount + $managerChangedCount + $updatedMajorCount) -gt 0
+      $hasOverdueTerminatedAccounts = $overdueTerminatedAccounts.Count -gt 0
 
       if (-not $hasSignificantChanges) {
+        $statusText = if ($hasOverdueTerminatedAccounts) { 'Status: Manual deletions required' } else { 'Status: No changes required' }
+        $completionSpeak = if ($hasOverdueTerminatedAccounts) { 'BambooHR to Entra ID sync completed with manual deletions required' } else { 'BambooHR to Entra ID sync completed with no changes' }
+
         # No changes were made (WhatIf mode or no updates needed)
         New-AdaptiveCard {
           New-AdaptiveTextBlock -Text 'BambooHR to Entra ID Sync Completed' -Wrap -Weight Bolder
-          New-AdaptiveTextBlock -Text 'Status: No changes required' -Wrap
-          New-AdaptiveTextBlock -Text 'Mode: WhatIf Preview' -Wrap -Color Accent
+          if ($hasOverdueTerminatedAccounts) {
+            New-AdaptiveTextBlock -Text $statusText -Wrap -Color Warning
+          }
+          else {
+            New-AdaptiveTextBlock -Text $statusText -Wrap
+          }
+          if ($WhatIfPreference) {
+            New-AdaptiveTextBlock -Text 'Mode: WhatIf Preview' -Wrap -Color Accent
+          }
           New-AdaptiveTextBlock -Text "Duration: $([math]::Round((New-TimeSpan -Start $Script:StartTime -End (Get-Date)).TotalMinutes, 2)) minutes" -Wrap
           if ($licenseInfo) {
             New-AdaptiveTextBlock -Text "Licenses: $($licenseInfo.ConsumedUnits) used / $($licenseInfo.AvailableUnits) available / $($licenseInfo.EnabledUnits) total" -Wrap
           }
+          Add-TerminatedAccountDeletionReminderCardSection -DaysToKeepAccountsAfterTermination $Script:Config.Features.DaysToKeepAccountsAfterTermination -MaxExamples $maxExamples -PendingDeletionAccounts $overdueTerminatedAccounts
           New-AdaptiveTextBlock -Text "Timestamp: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -Wrap
-        } -Uri $Script:Config.Features.TeamsCardUri -Speak 'BambooHR to Entra ID sync completed with no changes'
+        } -Uri $Script:Config.Features.TeamsCardUri -Speak $completionSpeak
         Write-PSLog 'Teams notification sent: No changes made' -Severity Information
       }
       else {
@@ -5016,6 +5250,7 @@ if (-not $changesWereApplied) {
               New-AdaptiveTextBlock -Text $line -Wrap
             }
           }
+          Add-TerminatedAccountDeletionReminderCardSection -DaysToKeepAccountsAfterTermination $Script:Config.Features.DaysToKeepAccountsAfterTermination -MaxExamples $maxExamples -PendingDeletionAccounts $overdueTerminatedAccounts
           New-AdaptiveTextBlock -Text "`nCompleted: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -Wrap -Size Small
         } -Uri $Script:Config.Features.TeamsCardUri -Speak 'BambooHR to Entra ID sync completed successfully'
         Write-PSLog 'Teams notification sent: Sync summary with changes' -Severity Information
@@ -5034,75 +5269,5 @@ else {
   Write-PSLog -Message 'Skipping shared mailbox delegation sync: WhatIf mode is active.' -Severity Information
 }
 
-function Write-TerminatedAccountDeletionReminders {
-  [CmdletBinding()]
-  param(
-    [Parameter(Mandatory = $true)]
-    [int]
-    $DaysToKeepAccountsAfterTermination
-  )
-
-  if ($DaysToKeepAccountsAfterTermination -le 0) {
-    return
-  }
-
-  $cutoffUtc = (Get-Date).ToUniversalTime().AddDays(-$DaysToKeepAccountsAfterTermination)
-  Write-PSLog -Message "Checking for terminated accounts older than $DaysToKeepAccountsAfterTermination days (manual deletion cutoff: $($cutoffUtc.ToString('yyyy-MM-dd')))" -Severity Debug
-
-  $users = $null
-  try {
-    $users = Invoke-WithRetry -Operation 'Query terminated accounts for deletion reminders' -ScriptBlock {
-      Get-MgUser -All -Filter "employeeId eq 'LVR'" -Property 'id,displayName,userPrincipalName,mail,employeeId,accountEnabled,employeeLeaveDateTime,department,companyName'
-    }
-  }
-  catch {
-    Write-PSLog -Message "Primary query failed (employeeId filter). Falling back to disabled-user scan: $($_.Exception.Message)" -Severity Warning
-    try {
-      $users = Invoke-WithRetry -Operation 'Fallback query disabled accounts for deletion reminders' -ScriptBlock {
-        Get-MgUser -All -Filter 'accountEnabled eq false' -Property 'id,displayName,userPrincipalName,mail,employeeId,accountEnabled,employeeLeaveDateTime,department,companyName'
-      }
-      if ($users) {
-        $users = $users | Where-Object {
-          ($_.EmployeeId -eq 'LVR') -or (-not [string]::IsNullOrWhiteSpace($_.CompanyName) -and $_.CompanyName -match 'OffboardingComplete')
-        }
-      }
-    }
-    catch {
-      Write-PSLog -Message "Fallback query also failed for deletion reminders: $($_.Exception.Message)" -Severity Warning
-      return
-    }
-  }
-
-  if (-not $users) {
-    return
-  }
-
-  foreach ($u in $users) {
-    if ($u.AccountEnabled -ne $false) {
-      continue
-    }
-
-    $leaveUtc = $null
-    if ($u.EmployeeLeaveDateTime) {
-      try { $leaveUtc = ([datetime]$u.EmployeeLeaveDateTime).ToUniversalTime() } catch { $leaveUtc = $null }
-    }
-
-    if (-not $leaveUtc -and -not [string]::IsNullOrWhiteSpace($u.CompanyName)) {
-      $leaveUtc = Get-OffboardingCompletionDateFromCompanyName -CompanyName $u.CompanyName
-    }
-
-    if (-not $leaveUtc) {
-      continue
-    }
-
-    if ($leaveUtc -le $cutoffUtc) {
-      $ageDays = [math]::Floor(((Get-Date).ToUniversalTime() - $leaveUtc).TotalDays)
-      $upn = if ([string]::IsNullOrWhiteSpace($u.UserPrincipalName)) { $u.Mail } else { $u.UserPrincipalName }
-      Write-PSLog -Message "Manual deletion required: $upn (terminated $ageDays days ago; leaveDateTime=$($leaveUtc.ToString('yyyy-MM-dd')))." -Severity Warning
-    }
-  }
-}
-
 #Script End
-Write-TerminatedAccountDeletionReminders -DaysToKeepAccountsAfterTermination $Script:Config.Features.DaysToKeepAccountsAfterTermination
 exit 0

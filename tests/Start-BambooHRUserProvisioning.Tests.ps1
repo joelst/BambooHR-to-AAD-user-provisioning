@@ -176,6 +176,31 @@ Describe 'Static validation' {
         }
       }
     }
+
+    It 'includes manual deletion warnings in Teams summaries for both runbooks' {
+      foreach ($path in @($script:staticStartScriptPath, $script:staticWebhookScriptPath)) {
+        $content = Get-Content -Raw -Path $path
+        $content | Should -Match 'Add-TerminatedAccountDeletionReminderCardSection'
+        $content | Should -Match 'Manual deletions required:'
+      }
+    }
+
+    It 'keeps the webhook runbook deletion sweep scoped to webhook-targeted runs' {
+      $content = Get-Content -Raw -Path $script:staticWebhookScriptPath
+
+      $content | Should -Match 'Skipping terminated-account deletion reminder sweep'
+    }
+
+    It 'only shows WhatIf preview mode when WhatIfPreference is true' {
+      $guardedPattern = [regex]::Escape('if ($WhatIfPreference) {') + '\s*' + [regex]::Escape("New-AdaptiveTextBlock -Text 'Mode: WhatIf Preview' -Wrap -Color Accent")
+
+      foreach ($path in @($script:staticStartScriptPath, $script:staticWebhookScriptPath)) {
+        $content = Get-Content -Raw -Path $path
+
+        ([regex]::Matches($content, "New-AdaptiveTextBlock -Text 'Mode: WhatIf Preview' -Wrap -Color Accent")).Count | Should -Be 1
+        $content | Should -Match $guardedPattern
+      }
+    }
   }
 }
 
@@ -255,6 +280,7 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
       $script:WelcomeUserText = ''
       $script:WelcomeLinksHtml = ''
       $script:MailboxDelegationParams = @()
+      $script:ForceActiveUserAttributeRecheck = $false
       $script:LogPath = $env:TEMP
       $script:MaxRetryAttempts = 3
       $script:RetryDelaySeconds = 5
@@ -271,6 +297,7 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
     $functionNames = @(
       'Initialize-Configuration',
       'Invoke-WithRetry',
+      'ConvertTo-TrimmedString',
       'ConvertTo-StandardName',
       'ConvertTo-PhoneNumber',
       'ConvertTo-BambooHrHireDate',
@@ -285,6 +312,8 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
       'Set-TerminatedUserProfileFields',
       'Get-OffboardingCompletionMarker',
       'Get-OffboardingCompletionDateFromCompanyName',
+      'Get-TerminatedAccountsPendingDeletion',
+      'Write-TerminatedAccountDeletionReminders',
       'Invoke-UserOffboarding'
     )
     $definitions = Get-FunctionDefinitionsFromFile -ScriptPath $startScriptPath -FunctionNames $functionNames
@@ -341,6 +370,11 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
       )
 
       return $null
+    }
+
+    function Get-MgUser {
+      [CmdletBinding()]
+      param()
     }
 
     function Update-MgUser {
@@ -412,6 +446,7 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
         EnableMobilePhoneSync         = $true
         CurrentOnly                   = $true
         ForceSharedMailboxPermissions = $true
+        ForceActiveUserAttributeRecheck = $true
       } | ConvertTo-Json
 
       Mock Get-AutomationVariable {
@@ -428,7 +463,30 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
       $config.Features.EnableMobilePhoneSync | Should -BeTrue
       $config.Features.CurrentOnly | Should -BeTrue
       $config.Features.ForceSharedMailboxPermissions | Should -BeTrue
+      $config.Features.ForceActiveUserAttributeRecheck | Should -BeTrue
       $config.BambooHR.ReportsUri | Should -Match 'onlyCurrent=true'
+    }
+
+    It 'does not let custom JSON override explicitly bound active recheck flag' {
+      $script:ForceActiveUserAttributeRecheck = $true
+      $script:PSBoundParameters['ForceActiveUserAttributeRecheck'] = $true
+
+      $customJson = @{
+        ForceActiveUserAttributeRecheck = $false
+      } | ConvertTo-Json
+
+      Mock Get-AutomationVariable {
+        param([string]$Name)
+        if ($Name -eq 'BHR_CustomizationsJson') {
+          return $customJson
+        }
+        return $null
+      }
+
+      $config = Initialize-Configuration
+
+      $config.IsValid | Should -BeTrue
+      $config.Features.ForceActiveUserAttributeRecheck | Should -BeTrue
     }
 
     It 'does not let custom JSON override explicitly bound force delegation flag' {
@@ -464,6 +522,16 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
   Context 'ConvertTo-StandardName' {
     It 'normalizes names with diacritics and spacing' {
       ConvertTo-StandardName '  jOÃO  sIlva  ' | Should -Be 'João Silva'
+    }
+  }
+
+  Context 'ConvertTo-TrimmedString' {
+    It 'trims leading and trailing whitespace' {
+      ConvertTo-TrimmedString '  Sales Manager  ' | Should -Be 'Sales Manager'
+    }
+
+    It 'returns empty string for whitespace-only input' {
+      ConvertTo-TrimmedString '   ' | Should -Be ''
     }
   }
 
@@ -589,6 +657,38 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
         -EntraIdUpnObjDetails $entraIdObj `
         -BhrEmploymentStatus 'Terminated' | Should -BeFalse
     }
+
+    It 'returns true for active users when force recheck is enabled and last changed matches' {
+      $entraIdObj = [pscustomobject]@{ Id = '1'; UserPrincipalName = 'user@contoso.com'; AccountEnabled = $true }
+
+      Test-ShouldSyncExistingUser -EntraIdEmployeeNumber '123' `
+        -EntraIdEmployeeNumberByEid '123' `
+        -EntraIdUpnFromEidLookup 'user@contoso.com' `
+        -EntraIdUpnFromUpnLookup 'user@contoso.com' `
+        -BhrWorkEmail 'user@contoso.com' `
+        -BhrLastChanged '2026-03-26T01:00:00Z' `
+        -UpnExtensionAttribute1 '2026-03-26T01:00:00Z' `
+        -EntraIdEidObjDetails $entraIdObj `
+        -EntraIdUpnObjDetails $entraIdObj `
+        -BhrEmploymentStatus 'Active' `
+        -ForceActiveUserAttributeRecheck $true | Should -BeTrue
+    }
+
+    It 'returns false for suspended users even when force recheck is enabled' {
+      $entraIdObj = [pscustomobject]@{ Id = '1'; UserPrincipalName = 'user@contoso.com'; AccountEnabled = $true }
+
+      Test-ShouldSyncExistingUser -EntraIdEmployeeNumber '123' `
+        -EntraIdEmployeeNumberByEid '123' `
+        -EntraIdUpnFromEidLookup 'user@contoso.com' `
+        -EntraIdUpnFromUpnLookup 'user@contoso.com' `
+        -BhrWorkEmail 'user@contoso.com' `
+        -BhrLastChanged '2026-03-26T01:00:00Z' `
+        -UpnExtensionAttribute1 '2026-03-26T01:00:00Z' `
+        -EntraIdEidObjDetails $entraIdObj `
+        -EntraIdUpnObjDetails $entraIdObj `
+        -BhrEmploymentStatus 'Suspended' `
+        -ForceActiveUserAttributeRecheck $true | Should -BeFalse
+    }
   }
 
   Context 'Teams changes card helper' {
@@ -672,6 +772,160 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
 
       $marker | Should -Match 'OffboardingComplete:'
       $parsed.ToString('yyyy-MM-ddTHH:mm:ssZ') | Should -Be '2026-03-26T04:00:00Z'
+    }
+  }
+
+  Context 'Terminated account deletion reminders' {
+    BeforeEach {
+      $script:loggedMessages = @()
+
+      Mock Write-PSLog {
+        param($Message, $Severity)
+        $script:loggedMessages += [PSCustomObject]@{
+          Message  = $Message
+          Severity = $Severity
+        }
+      }
+
+      Mock Invoke-WithRetry { @() }
+    }
+
+    It 'returns overdue disabled accounts based on EmployeeLeaveDateTime' {
+      $script:overdueLeaveUtc = (Get-Date).ToUniversalTime().AddDays(-21)
+      $script:recentLeaveUtc = (Get-Date).ToUniversalTime().AddDays(-5)
+      $script:enabledLeaveUtc = (Get-Date).ToUniversalTime().AddDays(-30)
+
+      Mock Invoke-WithRetry {
+        @(
+          [PSCustomObject]@{
+            AccountEnabled        = $false
+            CompanyName           = $null
+            DisplayName           = 'Overdue User'
+            EmployeeId            = 'LVR'
+            EmployeeLeaveDateTime = $script:overdueLeaveUtc
+            Id                    = 'user-id-1'
+            Mail                  = 'overdue.user@contoso.com'
+            UserPrincipalName     = 'overdue.user@contoso.com'
+          }
+          [PSCustomObject]@{
+            AccountEnabled        = $false
+            CompanyName           = $null
+            DisplayName           = 'Recent User'
+            EmployeeId            = 'LVR'
+            EmployeeLeaveDateTime = $script:recentLeaveUtc
+            Id                    = 'user-id-2'
+            Mail                  = 'recent.user@contoso.com'
+            UserPrincipalName     = 'recent.user@contoso.com'
+          }
+          [PSCustomObject]@{
+            AccountEnabled        = $true
+            CompanyName           = $null
+            DisplayName           = 'Enabled User'
+            EmployeeId            = 'LVR'
+            EmployeeLeaveDateTime = $script:enabledLeaveUtc
+            Id                    = 'user-id-3'
+            Mail                  = 'enabled.user@contoso.com'
+            UserPrincipalName     = 'enabled.user@contoso.com'
+          }
+        )
+      }
+
+      $result = @(Get-TerminatedAccountsPendingDeletion -DaysToKeepAccountsAfterTermination 14)
+
+      $result.Count | Should -Be 1
+      $result[0].Identifier | Should -Be 'overdue.user@contoso.com'
+      $result[0].AgeDays | Should -BeGreaterThan 20
+    }
+
+    It 'falls back to the offboarding completion marker when EmployeeLeaveDateTime is missing' {
+      $script:markerLeaveUtc = [datetime]::Parse('2026-03-26T04:00:00Z', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).ToUniversalTime()
+      $script:offboardingMarker = Get-OffboardingCompletionMarker -LeaveDateTimeUtc $script:markerLeaveUtc
+
+      Mock Invoke-WithRetry {
+        @(
+          [PSCustomObject]@{
+            AccountEnabled        = $false
+            CompanyName           = $script:offboardingMarker
+            DisplayName           = 'Marker User'
+            EmployeeId            = 'LVR'
+            EmployeeLeaveDateTime = $null
+            Id                    = 'user-id-4'
+            Mail                  = 'marker.user@contoso.com'
+            UserPrincipalName     = 'marker.user@contoso.com'
+          }
+        )
+      }
+
+      $result = @(Get-TerminatedAccountsPendingDeletion -DaysToKeepAccountsAfterTermination 14)
+
+      $result.Count | Should -Be 1
+      $result[0].Identifier | Should -Be 'marker.user@contoso.com'
+      $result[0].LeaveDateTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ') | Should -Be '2026-03-26T04:00:00Z'
+    }
+
+    It 'falls back to the disabled-user scan when the employeeId query fails' {
+      $script:fallbackLeaveUtc = (Get-Date).ToUniversalTime().AddDays(-30)
+      $script:fallbackMarker = Get-OffboardingCompletionMarker -LeaveDateTimeUtc $script:fallbackLeaveUtc
+      $script:invokeWithRetryOperations = @()
+
+      Mock Invoke-WithRetry {
+        param($ScriptBlock, $MaxAttempts, $InitialDelaySeconds, $Operation, $RetryableErrorTypes)
+
+        $script:invokeWithRetryOperations += $Operation
+        if ($Operation -eq 'Query terminated accounts for deletion reminders') {
+          throw 'employeeId filter unsupported'
+        }
+
+        return @(
+          [PSCustomObject]@{
+            AccountEnabled        = $false
+            CompanyName           = $script:fallbackMarker
+            DisplayName           = 'Fallback User'
+            EmployeeId            = ''
+            EmployeeLeaveDateTime = $null
+            Id                    = 'user-id-5'
+            Mail                  = 'fallback.user@contoso.com'
+            UserPrincipalName     = 'fallback.user@contoso.com'
+          }
+        )
+      }
+
+      $result = @(Get-TerminatedAccountsPendingDeletion -DaysToKeepAccountsAfterTermination 14)
+
+      $result.Count | Should -Be 1
+      $result[0].Identifier | Should -Be 'fallback.user@contoso.com'
+      $script:invokeWithRetryOperations | Should -Contain 'Query terminated accounts for deletion reminders'
+      $script:invokeWithRetryOperations | Should -Contain 'Fallback query disabled accounts for deletion reminders'
+    }
+
+    It 'returns no deletion candidates when account retention is disabled' {
+      $result = @(Get-TerminatedAccountsPendingDeletion -DaysToKeepAccountsAfterTermination 0)
+
+      $result.Count | Should -Be 0
+      Assert-MockCalled Invoke-WithRetry -Times 0
+    }
+
+    It 'logs manual deletion warnings for overdue accounts' {
+      $leaveUtc = [datetime]::Parse('2026-03-01T00:00:00Z', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).ToUniversalTime()
+
+      Mock Get-TerminatedAccountsPendingDeletion {
+        @(
+          [PSCustomObject]@{
+            AgeDays          = 21
+            DisplayName      = 'Reminder User'
+            Identifier       = 'reminder.user@contoso.com'
+            LeaveDateTimeUtc = $leaveUtc
+          }
+        )
+      }
+
+      $result = @(Write-TerminatedAccountDeletionReminders -DaysToKeepAccountsAfterTermination 14)
+      $warningLogs = @($script:loggedMessages | Where-Object {
+          $_.Severity -eq 'Warning' -and $_.Message -like 'Manual deletion required: reminder.user@contoso.com*'
+        })
+
+      $result.Count | Should -Be 1
+      $warningLogs.Count | Should -Be 1
     }
   }
 

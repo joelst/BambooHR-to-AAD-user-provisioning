@@ -33,7 +33,7 @@ BeforeAll {
 
   $functionNames = @(
     'Get-TargetEmployeeIdsFromWebhookData',
-    'Get-WebhookChangedFieldAnalysis',
+    'ConvertTo-TrimmedString',
     'Test-BambooHrWebhookSignature',
     'Test-WebhookChangedFieldsRelevant'
   )
@@ -52,6 +52,14 @@ BeforeAll {
 }
 
 Describe 'Start-BambooHrWebhookSync helper functions' {
+  It 'trims leading and trailing whitespace for Graph-bound attribute values' {
+    ConvertTo-TrimmedString '  Sales Manager  ' | Should -Be 'Sales Manager'
+  }
+
+  It 'returns empty string for whitespace-only values' {
+    ConvertTo-TrimmedString '   ' | Should -Be ''
+  }
+
   It 'merges and deduplicates employee IDs from manual input and webhook JSON' {
     $webhookData = [PSCustomObject]@{
       RequestBody = @'
@@ -236,71 +244,6 @@ Describe 'Start-BambooHrWebhookSync helper functions' {
       }
 
       Test-WebhookChangedFieldsRelevant -WebhookData $webhookData | Should -BeTrue
-    }
-  }
-
-  Context 'Get-WebhookChangedFieldAnalysis' {
-    It 'classifies unsynced-only updates without stopping targeted processing metadata' {
-      $webhookData = [PSCustomObject]@{
-        RequestBody = @'
-{
-  "type": "employee.updated",
-  "data": {
-    "changedFields": ["shirtSize", "ssn"],
-    "employeeId": "2145"
-  }
-}
-'@
-      }
-
-      $analysis = Get-WebhookChangedFieldAnalysis -WebhookData $webhookData
-
-      $analysis.EventType | Should -Be 'employee.updated'
-      $analysis.EmployeeId | Should -Be '2145'
-      $analysis.SyncedFields | Should -BeNullOrEmpty
-      $analysis.UnsyncedFields | Should -Be @('shirtSize', 'ssn')
-      $analysis.HasOnlyUnsyncedFields | Should -BeTrue
-      $analysis.ShouldTreatAsRelevant | Should -BeFalse
-    }
-
-    It 'separates synced and unsynced fields for mixed updates' {
-      $webhookData = [PSCustomObject]@{
-        RequestBody = @'
-{
-  "type": "employee.updated",
-  "data": {
-    "changedFields": ["workEmail", "shirtSize"],
-    "employeeId": "2145"
-  }
-}
-'@
-      }
-
-      $analysis = Get-WebhookChangedFieldAnalysis -WebhookData $webhookData
-
-      $analysis.SyncedFields | Should -Be @('workEmail')
-      $analysis.UnsyncedFields | Should -Be @('shirtSize')
-      $analysis.HasOnlyUnsyncedFields | Should -BeFalse
-      $analysis.ShouldTreatAsRelevant | Should -BeTrue
-    }
-
-    It 'treats missing changedFields as processable' {
-      $webhookData = [PSCustomObject]@{
-        RequestBody = @'
-{
-  "type": "employee.updated",
-  "data": {
-    "employeeId": "2145"
-  }
-}
-'@
-      }
-
-      $analysis = Get-WebhookChangedFieldAnalysis -WebhookData $webhookData
-
-      $analysis.ChangedFields | Should -BeNullOrEmpty
-      $analysis.HasOnlyUnsyncedFields | Should -BeFalse
-      $analysis.ShouldTreatAsRelevant | Should -BeTrue
     }
   }
 }

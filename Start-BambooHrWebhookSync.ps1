@@ -359,28 +359,8 @@ $Script:SignificantChanges = [ordered]@{
 }
 $Script:CorrelationId = [Guid]::NewGuid().ToString()
 $Script:StartTime = Get-Date
-$Script:WebhookUnsyncedFieldsNote = $null
 
 function Add-SignificantChange {
-  <#
-    .SYNOPSIS
-    Adds a significant change entry to the global $Script:SignificantChanges hashtable.
-
-    .DESCRIPTION
-    This function updates the $Script:SignificantChanges hashtable with details about
-    significant changes detected during the BambooHR sync process. It ensures that
-    each change is categorized and associated with the relevant user.
-
-    .PARAMETER Category
-    The category of the significant change. Valid values are 'Created', 'Disabled',
-    'NameChanged', 'UpnChanged', 'ManagerChanged', 'UpdatedMajor'.
-
-    .PARAMETER User
-    The user associated with the significant change.
-
-    .PARAMETER Detail
-    Optional detail about the significant change.
-  #>
   [CmdletBinding()]
   param(
     [Parameter(Mandatory = $true)]
@@ -731,8 +711,11 @@ function Initialize-Configuration {
       MailboxDelegationParams            = if ($script:MailboxDelegationParams.Count -eq 0) {
         # Set default mailbox delegation configuration if none provided
         @(
-          @{ Group = 'SharedMailboxAccessMailbox1'; DelegateMailbox = 'Mailbox1' }
-          @{ Group = 'SharedMailboxAccessMailbox2'; DelegateMailbox = 'Mailbox2' }
+          @{ Group = 'CG-SharedMailboxDelegatedAccessMailbox1'; DelegateMailbox = 'Mailbox1' }
+          @{ Group = 'CG-SharedMailboxDelegatedAccessMailbox2'; DelegateMailbox = 'Mailbox2' }
+          @{ Group = 'CG-SharedMailboxDelegatedAccessMailbox3'; DelegateMailbox = 'Mailbox3' }
+          @{ Group = 'CG-SharedMailboxDelegatedAccessMailbox4'; DelegateMailbox = 'Mailbox4' }
+          @{ Group = 'CG-SharedMailboxDelegatedAccessMailbox5'; DelegateMailbox = 'Mailbox5' }
         )
       }
       else { $script:MailboxDelegationParams }
@@ -831,117 +814,6 @@ function Get-TargetEmployeeIdsFromWebhookData {
   return @($idLookup | Sort-Object)
 }
 
-function Get-WebhookChangedFieldAnalysis {
-  <#
-  .SYNOPSIS
-  Analyze BambooHR webhook changedFields to determine whether any directly synced Entra attributes changed.
-
-  .DESCRIPTION
-  Returns a summary object that separates changedFields into synced and unsynced categories.
-  For employee.updated payloads that contain only unsynced fields, the caller can continue targeted
-  processing to reconcile BambooHR lastChanged in ExtensionAttribute1 while still surfacing which
-  changed fields were not written to Entra ID.
-
-  .PARAMETER WebhookData
-  The raw WebhookData object from Azure Automation containing RequestBody.
-
-  .OUTPUTS
-  [pscustomobject] with EventType, EmployeeId, ChangedFields, SyncedFields, UnsyncedFields,
-  ShouldTreatAsRelevant, and HasOnlyUnsyncedFields.
-  #>
-  [CmdletBinding()]
-  [OutputType([pscustomobject])]
-  param(
-    [Parameter()]
-    [object]
-    $WebhookData
-  )
-
-  $analysis = [pscustomobject]@{
-    EventType             = ''
-    EmployeeId            = ''
-    ChangedFields         = @()
-    SyncedFields          = @()
-    UnsyncedFields        = @()
-    ShouldTreatAsRelevant = $true
-    HasOnlyUnsyncedFields = $false
-  }
-
-  if ($null -eq $WebhookData) {
-    return $analysis
-  }
-
-  $requestBody = $null
-  if ($WebhookData.PSObject.Properties.Name -contains 'RequestBody') {
-    $requestBody = [string]$WebhookData.RequestBody
-  }
-  elseif ($WebhookData -is [string]) {
-    $requestBody = [string]$WebhookData
-  }
-
-  if ([string]::IsNullOrWhiteSpace($requestBody)) {
-    return $analysis
-  }
-
-  try {
-    $payload = $requestBody | ConvertFrom-Json -Depth 12
-  }
-  catch {
-    return $analysis
-  }
-
-  $analysis.EventType = [string]$payload.type
-  if ($null -ne $payload.data -and $payload.data.PSObject.Properties.Name -contains 'employeeId') {
-    $analysis.EmployeeId = [string]$payload.data.employeeId
-  }
-
-  if ($analysis.EventType -ne 'employee.updated') {
-    return $analysis
-  }
-
-  if ($null -eq $payload.data -or $payload.data.PSObject.Properties.Name -notcontains 'changedFields') {
-    return $analysis
-  }
-
-  $analysis.ChangedFields = @(
-    $payload.data.changedFields | Where-Object {
-      [string]::IsNullOrWhiteSpace([string]$_) -eq $false
-    } | ForEach-Object {
-      [string]$_
-    }
-  )
-
-  if ($analysis.ChangedFields.Count -eq 0) {
-    return $analysis
-  }
-
-  $syncedBhrFields = [System.Collections.Generic.HashSet[string]]::new(
-    [string[]]@(
-      'status', 'hireDate', 'department', 'employeeNumber', 'firstName', 'lastName',
-      'displayName', 'jobTitle', 'supervisorEmail', 'workEmail', 'lastChanged',
-      'employmentHistoryStatus', 'bestEmail', 'location', 'workPhone', 'preferredName',
-      'mobilePhone', 'photoUploaded'
-    ),
-    [System.StringComparer]::OrdinalIgnoreCase
-  )
-
-  foreach ($field in $analysis.ChangedFields) {
-    if ($syncedBhrFields.Contains([string]$field)) {
-      $analysis.SyncedFields += $field
-    }
-    else {
-      $analysis.UnsyncedFields += $field
-    }
-  }
-
-  if ($analysis.SyncedFields.Count -eq 0 -and $analysis.UnsyncedFields.Count -gt 0) {
-    $analysis.ShouldTreatAsRelevant = $false
-    $analysis.HasOnlyUnsyncedFields = $true
-  }
-
-  return $analysis
-}
-
 function Test-WebhookChangedFieldsRelevant {
   <#
   .SYNOPSIS
@@ -971,7 +843,54 @@ function Test-WebhookChangedFieldsRelevant {
     return $true
   }
 
-  return (Get-WebhookChangedFieldAnalysis -WebhookData $WebhookData).ShouldTreatAsRelevant
+  $requestBody = $null
+  if ($WebhookData.PSObject.Properties.Name -contains 'RequestBody') {
+    $requestBody = [string]$WebhookData.RequestBody
+  }
+  elseif ($WebhookData -is [string]) {
+    $requestBody = [string]$WebhookData
+  }
+
+  if ([string]::IsNullOrWhiteSpace($requestBody)) {
+    return $true
+  }
+
+  try {
+    $payload = $requestBody | ConvertFrom-Json -Depth 12
+  }
+  catch {
+    return $true
+  }
+
+  # Only filter for employee.updated events — other types (created, deleted) always proceed
+  if ([string]$payload.type -ne 'employee.updated') {
+    return $true
+  }
+
+  # If changedFields is missing or empty, assume all fields may have changed
+  $changedFields = @($payload.data.changedFields)
+  if ($changedFields.Count -eq 0) {
+    return $true
+  }
+
+  # BambooHR field names that are synced to Entra ID attributes
+  $syncedBhrFields = [System.Collections.Generic.HashSet[string]]::new(
+    [string[]]@(
+      'status', 'hireDate', 'department', 'employeeNumber', 'firstName', 'lastName',
+      'displayName', 'jobTitle', 'supervisorEmail', 'workEmail', 'lastChanged',
+      'employmentHistoryStatus', 'bestEmail', 'location', 'workPhone', 'preferredName',
+      'mobilePhone', 'photoUploaded'
+    ),
+    [System.StringComparer]::OrdinalIgnoreCase
+  )
+
+  foreach ($field in $changedFields) {
+    if ($syncedBhrFields.Contains([string]$field)) {
+      return $true
+    }
+  }
+
+  return $false
 }
 
 function Test-BambooHrWebhookSignature {
@@ -1129,12 +1048,10 @@ if ($null -ne $WebhookData) {
   }
 }
 
-$webhookChangedFieldAnalysis = Get-WebhookChangedFieldAnalysis -WebhookData $WebhookData
-if ($webhookChangedFieldAnalysis.HasOnlyUnsyncedFields) {
-  $unsyncedFieldsDisplay = $webhookChangedFieldAnalysis.UnsyncedFields -join ', '
-  $webhookEmployeeId = if ([string]::IsNullOrWhiteSpace($webhookChangedFieldAnalysis.EmployeeId)) { '<unknown>' } else { $webhookChangedFieldAnalysis.EmployeeId }
-  $Script:WebhookUnsyncedFieldsNote = "Webhook changed BambooHR fields not mapped to Entra ID: $($unsyncedFieldsDisplay). Those field values were not written to Entra; targeted sync continued so BambooHR lastChanged could still be reconciled."
-  Write-PSLog -Message "BambooHR webhook employee $($webhookEmployeeId) changed only fields not synced to Entra ID ($($unsyncedFieldsDisplay)). Continuing targeted sync so BambooHR lastChanged can still be reconciled in ExtensionAttribute1." -Severity Information
+# Early exit: if the webhook payload is employee.updated but only non-synced fields changed, skip processing
+if ($null -ne $WebhookData -and -not (Test-WebhookChangedFieldsRelevant -WebhookData $WebhookData)) {
+  Write-PSLog -Message 'BambooHR webhook changedFields contain no fields synced to Entra ID. Exiting without changes.' -Severity Information
+  exit 0
 }
 
 if ($Script:ResolvedTargetEmployeeIds.Count -eq 0) {
@@ -2812,6 +2729,33 @@ function Get-NewPassword {
   return $password
 }
 
+function ConvertTo-TrimmedString {
+  <#
+        .SYNOPSIS
+        Trim leading and trailing whitespace from string values.
+
+        .DESCRIPTION
+        Returns an empty string for null or whitespace-only input so downstream
+        Graph attribute comparisons and updates work with normalized values.
+
+        .PARAMETER value
+        String value to normalize.
+        #>
+  [CmdletBinding()]
+  [OutputType([string])]
+  param(
+    [Parameter(Mandatory = $false)]
+    [AllowNull()]
+    [string]$value
+  )
+
+  if ([string]::IsNullOrWhiteSpace($value)) {
+    return ''
+  }
+
+  return $value.Trim()
+}
+
 function ConvertTo-StandardName {
   <#
         .SYNOPSIS
@@ -3728,11 +3672,11 @@ $employees | Sort-Object -Property LastName |
     #>
 
     # Metadata fields
-    $bhrlastChanged = "$($_.lastChanged)"           # Last modified timestamp in BambooHR
-    $bhrHireDate = "$($_.hireDate)"                 # Employee hire date
-    $bhremployeeNumber = "$($_.employeeNumber)"     # Unique employee number
+    $bhrlastChanged = ConvertTo-TrimmedString $_.lastChanged           # Last modified timestamp in BambooHR
+    $bhrHireDate = ConvertTo-TrimmedString $_.hireDate                 # Employee hire date
+    $bhremployeeNumber = ConvertTo-TrimmedString $_.employeeNumber     # Unique employee number
     # Job title as listed in Bamboo HR
-    $bhrJobTitle = "$($_.jobTitle)"
+    $bhrJobTitle = ConvertTo-TrimmedString $_.jobTitle
     # Department as listed in Bamboo HR (Graph API limit: 64 characters, no control chars)
     $bhrDepartment = ([regex]::Replace("$($_.department)", '[\p{C}]', '')).Trim()
     if ($bhrDepartment.Length -gt 64) {
@@ -3740,23 +3684,23 @@ $employees | Sort-Object -Property LastName |
       $bhrDepartment = $bhrDepartment.Substring(0, 64).TrimEnd()
     }
     # Supervisor email address as listed in Bamboo HR
-    $bhrSupervisorEmail = "$($_.supervisorEmail)"
+    $bhrSupervisorEmail = ConvertTo-TrimmedString $_.supervisorEmail
     # Work email address as listedin Bamboo HR
-    $bhrWorkEmail = "$($_.workEmail)"
+    $bhrWorkEmail = ConvertTo-TrimmedString $_.workEmail
     # Current status of the employee: Active, Terminated and if contains "Suspended" is in "maternity leave"
-    $bhrEmploymentStatus = "$($_.employmentHistoryStatus)"
-    $bhrEmployeeId = "$($_.id)"
+    $bhrEmploymentStatus = ConvertTo-TrimmedString $_.employmentHistoryStatus
+    $bhrEmployeeId = ConvertTo-TrimmedString $_.id
     # Translating user "status" from BambooHR to boolean, to match and compare with the Entra ID user account status
-    $bhrStatus = "$($_.status)"
+    $bhrStatus = ConvertTo-TrimmedString $_.status
     if ($bhrStatus -eq 'Inactive')
     { $bhrAccountEnabled = $False }
     if ($bhrStatus -eq 'Active')
     { $bhrAccountEnabled = $True }
-    $bhrOfficeLocation = "$($_.location)"
+    $bhrOfficeLocation = ConvertTo-TrimmedString $_.location
     $bhrPreferredName = ConvertTo-StandardName "$($_.preferredName)"
     $bhrWorkPhone = ConvertTo-PhoneNumber "$($_.workPhone)"
     $bhrMobilePhone = ConvertTo-PhoneNumber "$($_.mobilePhone)"
-    $bhrBestEmail = "$($_.bestEmail)"
+    $bhrBestEmail = ConvertTo-TrimmedString $_.bestEmail
     $bhrFirstName = ConvertTo-StandardName $_.firstName
     # First name of employee in Bamboo HR
     $bhrLastName = ConvertTo-StandardName $_.lastName
@@ -4328,7 +4272,7 @@ $employees | Sort-Object -Property LastName |
                 }
 
                 # Checking department if correctly set, if not, configure the Department as set in BambooHR
-                if ($entraIdDepartment.Trim() -ne $bhrDepartment.Trim() -and -not [string]::IsNullOrWhiteSpace($bhrDepartment)) {
+                if ($entraIdDepartment.Trim() -ne $bhrDepartment.Trim()) {
                   Write-PSLog -Message "Entra ID department '$entraIdDepartment' does not match BambooHR department '$($bhrDepartment.Trim())'" -Severity Debug
                   if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
                     Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -Department $bhrDepartment" -Severity Debug
@@ -4582,16 +4526,17 @@ $employees | Sort-Object -Property LastName |
                 }
 
                 # Set Company name to $($Script:Config.Azure.CompanyName)"
-                if ($entraIdCompanyName.Trim() -ne $Script:Config.Azure.CompanyName.Trim()) {
-                  Write-PSLog -Message "Entra ID company name '$entraIdCompany' does not match '$($Script:Config.Azure.CompanyName)'" -Severity Debug
+                $normalizedCompanyName = ConvertTo-TrimmedString $Script:Config.Azure.CompanyName
+                if ($entraIdCompanyName.Trim() -ne $normalizedCompanyName) {
+                  Write-PSLog -Message "Entra ID company name '$entraIdCompany' does not match '$normalizedCompanyName'" -Severity Debug
                   if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
                     # Setting Company Name as $CompanyName to the employee, if not already set
-                    Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -CompanyName $($CompanyName.Trim())" -Severity Debug
+                    Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -CompanyName $normalizedCompanyName" -Severity Debug
                     try {
                       Invoke-WithRetry -Operation "Update CompanyName for: $bhrWorkEmail" -ScriptBlock {
-                        Update-MgUser -UserId $bhrWorkEmail -CompanyName $CompanyName.Trim() -ErrorAction Stop
+                        Update-MgUser -UserId $bhrWorkEmail -CompanyName $normalizedCompanyName -ErrorAction Stop
                       }
-                      Write-PSLog -Message " The $bhrWorkEmail employee Company attribute has been set to: $($Script:Config.Azure.CompanyName)." -Severity Information
+                      Write-PSLog -Message " The $bhrWorkEmail employee Company attribute has been set to: $normalizedCompanyName." -Severity Information
                     }
                     catch {
                       Write-PSLog -Message " Could not change the Company Name of $bhrWorkEmail. `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
@@ -4759,15 +4704,13 @@ $employees | Sort-Object -Property LastName |
                   Write-PSLog -Message " Changed the current UPN:$entraIdUPN of $entraIdObjectID to $bhrWorkEmail." -Severity Warning
                   Add-SignificantChange -Category UpnChanged -User $bhrWorkEmail -Detail "$entraIdUPN -> $bhrWorkEmail"
                   Write-PSLog -Message "UPN change: $entraIdUPN -> $bhrWorkEmail" -Severity Information
-                  $upnChangeBody = @'
-<p>Your email address was changed in the {0} BambooHR. Your user account has been changed accordingly.</p><ul><li>Use your new user name: {1}</li><li>Your password has not been modified.</li></ul><br/><p>{2}</p>
-'@ -f $Script:Config.Azure.CompanyName, $bhrWorkEmail, $Script:Config.Email.EmailSignature
                   $params = @{
                     Message         = @{
                       Subject       = "Login changed for $bhrdisplayName"
                       Body          = @{
                         ContentType = 'HTML'
-                        Content     = $upnChangeBody
+                        Content     = "
+<p>Your email address was changed in the $CompanyName BambooHR. Your user account has been changed accordingly.</p><ui><li>Use your new user name: $bhrWorkEmail</li><li>Your password has not been modified.</li></ul><br/><p>$EmailSignature</p>"
                       }
                       ToRecipients  = @(
                         @{
@@ -4776,43 +4719,35 @@ $employees | Sort-Object -Property LastName |
                           }
                         }
                       )
+                      CCRecipients  = @(
+                        @{
+                          EmailAddress = @{
+                            Address = $bhrSupervisorEmail
+                          }
+                        }
+                      )
+                      BCCRecipients = @(
+                        @{
+                          EmailAddress = @{
+                            Address = $NotificationEmailAddress
+                          }
+                        }
+                      )
                     }
                     SaveToSentItems = 'True'
-                  }
-
-                  if (-not [string]::IsNullOrWhiteSpace($bhrSupervisorEmail)) {
-                    $params.Message.CCRecipients = @(
-                      @{
-                        EmailAddress = @{
-                          Address = $bhrSupervisorEmail
-                        }
-                      }
-                    )
-                  }
-
-                  if (-not [string]::IsNullOrWhiteSpace($Script:Config.Email.NotificationEmailAddress)) {
-                    $params.Message.BCCRecipients = @(
-                      @{
-                        EmailAddress = @{
-                          Address = $Script:Config.Email.NotificationEmailAddress
-                        }
-                      }
-                    )
                   }
 
                   Invoke-WithRetry -Operation 'Send email address change notification' -ScriptBlock {
                     Send-MgUserMail -BodyParameter $params -UserId $Script:Config.Email.AdminEmailAddress -Verbose
                   }
 
-                  if (-not [string]::IsNullOrWhiteSpace($Script:Config.Features.TeamsCardUri)) {
-                    New-AdaptiveCard {
+                  New-AdaptiveCard {
 
-                      New-AdaptiveTextBlock -Text "Login changed for $bhrdisplayName" -HorizontalAlignment Center -Weight Bolder -Wrap
-                      New-AdaptiveTextBlock -Text "An email address was changed in the $($Script:Config.Azure.CompanyName) BambooHR. Your user account has been changed accordingly." -Wrap
-                      New-AdaptiveTextBlock -Text "The user should use the new user name: $bhrWorkEmail" -Wrap
-                      New-AdaptiveTextBlock -Text "The user's password has not been modified." -Wrap
-                    } -Uri $Script:Config.Features.TeamsCardUri -Speak "Login changed for $bhrdisplayName"
-                  }
+                    New-AdaptiveTextBlock -Text "Login changed for $bhrdisplayName" -HorizontalAlignment Center -Weight Bolder -Wrap
+                    New-AdaptiveTextBlock -Text "An email address was changed in the $($Script:Config.Azure.CompanyName) BambooHR. Your user account has been changed accordingly." -Wrap
+                    New-AdaptiveTextBlock -Text "The user should use the new user name: $bhrWorkEmail" -Wrap
+                    New-AdaptiveTextBlock -Text "The user's password has not been modified." -Wrap
+                  } -Uri $TeamsCardUri -Speak "Login changed for $bhrdisplayName"
                 }
                 catch {
                   Write-PSLog -Message " Error changing UPN for $entraIdObjectID. `n Exception: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error
@@ -4841,30 +4776,15 @@ $employees | Sort-Object -Property LastName |
               # Create Entra ID account, as it doesn't have one, if user hire date is less than $DaysAhead days in the future, or is in the past
               Write-PSLog -Message "$bhrWorkEmail does not have an Entra ID account and hire date ($normalizedBhrHireDate) is less than $($Script:Config.Features.DaysAhead) days from now." -Severity Information
 
-              # Build New-MgUser params — omit empty strings to avoid Graph API Request_BadRequest errors
-              $newUserParams = @{
-                EmployeeId                    = $bhrEmployeeNumber
-                CompanyName                   = $Script:Config.Azure.CompanyName
-                Surname                       = $bhrlastName
-                GivenName                     = $bhrfirstName
-                DisplayName                   = $bhrdisplayName
-                AccountEnabled                = $true
-                Mail                          = $bhrWorkEmail
-                EmployeeHireDate              = $normalizedBhrHireDate
-                UserPrincipalName             = $bhrWorkEmail
-                PasswordProfile               = $PasswordProfile
-                MailNickname                  = (Get-MailNicknameFromEmail -EmailAddress $bhrWorkEmail)
-                UsageLocation                 = $Script:Config.Azure.UsageLocation
-                OnPremisesExtensionAttributes = @{ extensionAttribute1 = $bhrlastChanged }
-              }
-              if (-not [string]::IsNullOrWhiteSpace($bhrDepartment)) { $newUserParams['Department'] = $bhrDepartment }
-              if (-not [string]::IsNullOrWhiteSpace($bhrjobTitle)) { $newUserParams['JobTitle'] = $bhrjobTitle }
-              if (-not [string]::IsNullOrWhiteSpace($bhrOfficeLocation)) { $newUserParams['OfficeLocation'] = $bhrOfficeLocation }
+              Write-PSLog -Message "Executing New-MgUser -EmployeeId $bhremployeeNumber -Department $bhrDepartment -CompanyName $($Script:Config.Azure.CompanyName) -Surname $bhrlastName -GivenName $bhrfirstName -DisplayName $bhrdisplayName -AccountEnabled -Mail $bhrWorkEmail -OfficeLocation $bhrOfficeLocation `
+                        -EmployeeHireDate $normalizedBhrHireDate -UserPrincipalName $bhrWorkEmail -PasswordProfile $PasswordProfile -JobTitle $bhrjobTitle -MailNickname $(Get-MailNicknameFromEmail -EmailAddress $bhrWorkEmail) -UsageLocation $($Script:Config.Azure.UsageLocation) -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged }" -Severity Debug
 
-              Write-PSLog -Message "Executing New-MgUser for $bhrWorkEmail with params: $($newUserParams.Keys -join ', ')" -Severity Debug
-
+              $normalizedCompanyName = ConvertTo-TrimmedString $Script:Config.Azure.CompanyName
               $user = Invoke-WithRetry -Operation "Create new user: $bhrWorkEmail" -ScriptBlock {
-                New-MgUser @newUserParams
+                New-MgUser -EmployeeId $bhrEmployeeNumber -Department $bhrDepartment -CompanyName $normalizedCompanyName -Surname $bhrlastName -GivenName $bhrfirstName -DisplayName $bhrdisplayName `
+                  -AccountEnabled -Mail $bhrWorkEmail -OfficeLocation $bhrOfficeLocation -EmployeeHireDate $normalizedBhrHireDate -UserPrincipalName $bhrWorkEmail -PasswordProfile $PasswordProfile `
+                  -JobTitle $bhrjobTitle -MailNickname (Get-MailNicknameFromEmail -EmailAddress $bhrWorkEmail) `
+                  -UsageLocation $Script:Config.Azure.UsageLocation -OnPremisesExtensionAttributes @{extensionAttribute1 = $bhrlastChanged }
               }
 
               # Did the account get created?
@@ -4949,8 +4869,6 @@ $employees | Sort-Object -Property LastName |
                   }
 
                   if ($userAvailableForPhoto) {
-                    # Re-fetch in outer scope — the assignment inside the Wait-ForCondition scriptblock is local to that scriptblock
-                    $photoUploadUser = Get-MgUser -UserId $bhrWorkEmail -ErrorAction SilentlyContinue
                     Write-PSLog "Executing: Set-MgUserPhotoContent -UserId $($photoUploadUser.Id) -InFile $profilePicPath" -Severity Debug
                     try {
                       Invoke-WithRetry -Operation "Set user photo for: $bhrWorkEmail" -ScriptBlock {
@@ -5227,9 +5145,6 @@ if ($changesWereApplied) {
         else {
           New-AdaptiveTextBlock -Text '✓ No errors' -Wrap -Color Good
         }
-        if ([string]::IsNullOrWhiteSpace($Script:WebhookUnsyncedFieldsNote) -eq $false) {
-          New-AdaptiveTextBlock -Text $Script:WebhookUnsyncedFieldsNote -Wrap -Color Accent
-        }
         if ($hasSignificantChanges) {
           New-AdaptiveTextBlock -Text "`nSignificant changes:" -Wrap -Weight Bolder
 
@@ -5335,9 +5250,6 @@ if (-not $changesWereApplied) {
           if ($licenseInfo) {
             New-AdaptiveTextBlock -Text "Licenses: $($licenseInfo.ConsumedUnits) used / $($licenseInfo.AvailableUnits) available / $($licenseInfo.EnabledUnits) total" -Wrap
           }
-          if ([string]::IsNullOrWhiteSpace($Script:WebhookUnsyncedFieldsNote) -eq $false) {
-            New-AdaptiveTextBlock -Text $Script:WebhookUnsyncedFieldsNote -Wrap -Color Accent
-          }
           New-AdaptiveTextBlock -Text "Timestamp: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -Wrap
         } -Uri $Script:Config.Features.TeamsCardUri -Speak 'BambooHR to Entra ID sync completed with no changes'
         Write-PSLog 'Teams notification sent: No changes made' -Severity Information
@@ -5352,9 +5264,6 @@ if (-not $changesWereApplied) {
           New-AdaptiveTextBlock -Text "Duration: $([math]::Round((New-TimeSpan -Start $Script:StartTime -End (Get-Date)).TotalMinutes, 2)) minutes" -Wrap
           if ($licenseInfo) {
             New-AdaptiveTextBlock -Text "Licenses: $($licenseInfo.ConsumedUnits) used / $($licenseInfo.AvailableUnits) available / $($licenseInfo.EnabledUnits) total" -Wrap
-          }
-          if ([string]::IsNullOrWhiteSpace($Script:WebhookUnsyncedFieldsNote) -eq $false) {
-            New-AdaptiveTextBlock -Text $Script:WebhookUnsyncedFieldsNote -Wrap -Color Accent
           }
           New-AdaptiveTextBlock -Text "`nSignificant changes:" -Wrap -Weight Bolder
 

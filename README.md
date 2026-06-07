@@ -19,13 +19,13 @@ This repository includes:
 
 ## Documentation map
 
-| Topic | Purpose |
-| --- | --- |
-| [docs/deployment.md](docs/deployment.md) | Prerequisites, Azure deployment flow, configuration inputs, webhook setup, and post-deploy steps |
-| [docs/operations.md](docs/operations.md) | Schedules, monitoring, runtime package maintenance, and incident handling |
-| [docs/development.md](docs/development.md) | Architecture, code layout, testing, and safe change workflow |
-| [docs/troubleshooting.md](docs/troubleshooting.md) | Common failure modes and targeted diagnostics |
-| [docs/security.md](docs/security.md) | Threat model, secret handling, PII boundaries, RBAC, and hardening checklist |
+| Topic                                              | Purpose                                                                                          |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| [docs/deployment.md](docs/deployment.md)           | Prerequisites, Azure deployment flow, configuration inputs, webhook setup, and post-deploy steps |
+| [docs/operations.md](docs/operations.md)           | Schedules, monitoring, runtime package maintenance, and incident handling                        |
+| [docs/development.md](docs/development.md)         | Architecture, code layout, testing, and safe change workflow                                     |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Common failure modes and targeted diagnostics                                                    |
+| [docs/security.md](docs/security.md)               | Threat model, secret handling, PII boundaries, RBAC, and hardening checklist                     |
 
 ## Deployment model
 
@@ -54,14 +54,15 @@ See [docs/security.md](docs/security.md) for the full threat model and hardening
 - **January 2026**: expanded offboarding to remove authentication methods, transfer owned groups, remove mailbox permissions, and improve mailbox-related error reporting.
 - **March 2026**: made delta sync the default pattern, replaced runbook-incompatible `[switch]` feature flags with `[bool]`, and significantly expanded the Pester suite.
 - **April 2026**: added the dedicated BambooHR webhook runbook, tightened Teams summary behavior to report only tracked significant changes, improved webhook handling for unsynced-only BambooHR field changes, and added PR guardrails for tests, linting, Bicep, and sensitive-data scanning.
+- **June 2026**: added `ForceActiveUserAttributeRecheck` for scheduled repair runs where active-user attributes must be re-evaluated even when BambooHR `lastChanged` matches, and hardened string normalization for department/name/title/company comparisons.
 - **Current deployment refresh**: added a supported Azure Automation Bicep template, a deployment helper, and a reorganized documentation set for deployment, operations, development, troubleshooting, and security.
 
 ## Runbooks in this repo
 
-| Runbook | Purpose |
-| --- | --- |
-| `Start-BambooHRUserProvisioning.ps1` | Scheduled hourly delta sync and weekly full reconciliation |
-| `Start-BambooHrWebhookSync.ps1` | Fast reaction path for BambooHR webhooks |
+| Runbook                                                 | Purpose                                                                   |
+| ------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `Start-BambooHRUserProvisioning.ps1`                    | Scheduled hourly delta sync and weekly full reconciliation                |
+| `Start-BambooHrWebhookSync.ps1`                         | Fast reaction path for BambooHR webhooks                                  |
 | `Update-AzureAutomationRuntimeEnvironmentPSModules.ps1` | Runtime package maintenance for the Automation PowerShell 7.4 environment |
 
 ## Validation commands

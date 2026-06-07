@@ -21,13 +21,23 @@ When a run fails, work in this order:
 ### Checks
 
 1. Confirm `TeamsCardUri` is still a valid Teams workflow/webhook endpoint.
-2. Confirm the run actually recorded significant changes.
-3. Check whether the run failed before the Teams notification block.
+2. If you expect a `Manual deletions required` warning, confirm the scheduled `Start-BambooHRUserProvisioning.ps1` run completed; webhook-targeted runs skip the tenant-wide deletion sweep.
+3. Confirm the run actually recorded significant changes or found overdue deletions.
+4. Check whether the run failed before the Teams notification block.
 
 ### Notes
 
 - The change card is intentionally gated on tracked significant changes now; ordinary log chatter is no longer enough to trigger it.
+- Overdue deletion warnings are added by the scheduled reconciliation run once an offboarded account is older than `DaysToKeepAccountsAfterTermination`.
 - If the Teams endpoint was rotated or retired, the encrypted Automation variable must be updated.
+
+## Teams summary shows manual deletions required
+
+### Checks
+
+1. Confirm the account is still disabled in Entra ID and older than `DaysToKeepAccountsAfterTermination`.
+2. Confirm `employeeLeaveDateTime` or the `OffboardingComplete` marker reflects the expected termination date.
+3. If the warning is unexpected, review your retention policy and raise `DaysToKeepAccountsAfterTermination` when longer retention is intentional.
 
 ## Webhook job never starts
 

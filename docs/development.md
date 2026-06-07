@@ -2,15 +2,15 @@
 
 ## Repository layout
 
-| Path | Purpose |
-| --- | --- |
-| `Start-BambooHRUserProvisioning.ps1` | Scheduled reconciliation runbook |
-| `Start-BambooHrWebhookSync.ps1` | Webhook-triggered targeted sync runbook |
-| `Update-AzureAutomationRuntimeEnvironmentPSModules.ps1` | Runtime package maintenance runbook |
-| `Add-ManagedIdentityPermissions.ps1` | Interactive admin permission bootstrap |
-| `tests\` | Pester coverage and static validation |
-| `infra\` | Azure Automation deployment assets |
-| `.github\workflows\` | PR validation and guardrails |
+| Path                                                    | Purpose                                 |
+| ------------------------------------------------------- | --------------------------------------- |
+| `Start-BambooHRUserProvisioning.ps1`                    | Scheduled reconciliation runbook        |
+| `Start-BambooHrWebhookSync.ps1`                         | Webhook-triggered targeted sync runbook |
+| `Update-AzureAutomationRuntimeEnvironmentPSModules.ps1` | Runtime package maintenance runbook     |
+| `Add-ManagedIdentityPermissions.ps1`                    | Interactive admin permission bootstrap  |
+| `tests\`                                                | Pester coverage and static validation   |
+| `infra\`                                                | Azure Automation deployment assets      |
+| `.github\workflows\`                                    | PR validation and guardrails            |
 
 ## Architecture summary
 
@@ -26,13 +26,13 @@ The runbooks normalize inputs in `Initialize-Configuration` and then rely on `$S
 
 ### Main configuration buckets
 
-| Bucket | Examples |
-| --- | --- |
-| `$Script:Config.Runtime` | retry counts, timeouts, log path, `WhatIfPreference` |
-| `$Script:Config.BambooHR` | API key, company subdomain, BambooHR endpoints |
-| `$Script:Config.Azure` | tenant ID, usage location, license ID |
-| `$Script:Config.Email` | admin/notification/help desk addresses and signatures |
-| `$Script:Config.Features` | sync toggles, mailbox delegation settings, webhook-related behavior |
+| Bucket                    | Examples                                                                                                                        |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `$Script:Config.Runtime`  | retry counts, timeouts, log path, `WhatIfPreference`                                                                            |
+| `$Script:Config.BambooHR` | API key, company subdomain, BambooHR endpoints                                                                                  |
+| `$Script:Config.Azure`    | tenant ID, usage location, license ID                                                                                           |
+| `$Script:Config.Email`    | admin/notification/help desk addresses and signatures                                                                           |
+| `$Script:Config.Features` | sync toggles (for example `FullSync`, `ForceActiveUserAttributeRecheck`), mailbox delegation settings, webhook-related behavior |
 
 ### Adding a new setting safely
 
@@ -53,16 +53,17 @@ The webhook runbook shares the same lifecycle logic but scopes the run to the em
 
 ## Key functions worth knowing
 
-| Function | Why it matters |
-| --- | --- |
-| `Write-PSLog` | Primary logging surface |
-| `Invoke-WithRetry` | Retry wrapper for transient API failures |
-| `Get-CachedUser` | Reduces repeated Graph lookups |
-| `Test-ShouldSyncExistingUser` | Gates attribute updates |
-| `Test-IsOffboardingComplete` | Detects incomplete offboarding |
-| `Invoke-UserOffboarding` | Central idempotent offboarding flow |
-| `Add-SignificantChange` | Feeds the Teams change summary |
-| `Connect-ExchangeOnlineIfNeeded` | Avoids unnecessary Exchange reconnects |
+| Function                         | Why it matters                                                                                   |
+| -------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `Write-PSLog`                    | Primary logging surface                                                                          |
+| `Invoke-WithRetry`               | Retry wrapper for transient API failures                                                         |
+| `Get-CachedUser`                 | Reduces repeated Graph lookups                                                                   |
+| `Test-ShouldSyncExistingUser`    | Gates attribute updates                                                                          |
+| `ConvertTo-NormalizedDepartment` | Normalizes department values (control chars removed, whitespace collapsed) before compare/update |
+| `Test-IsOffboardingComplete`     | Detects incomplete offboarding                                                                   |
+| `Invoke-UserOffboarding`         | Central idempotent offboarding flow                                                              |
+| `Add-SignificantChange`          | Feeds the Teams change summary                                                                   |
+| `Connect-ExchangeOnlineIfNeeded` | Avoids unnecessary Exchange reconnects                                                           |
 
 ## Coding standards
 
