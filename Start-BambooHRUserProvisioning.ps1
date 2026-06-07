@@ -3545,7 +3545,8 @@ $employees | Sort-Object -Property LastName |
           # Saving Entra ID attributes to be compared one by one with the details pulled from BambooHR
           $entraIdWorkEmail = ConvertTo-TrimmedString "$($entraIdUpnObjDetails.Mail)"
           $entraIdJobTitle = ConvertTo-TrimmedString "$($entraIdUpnObjDetails.JobTitle)"
-          $entraIdDepartment = ConvertTo-NormalizedDepartment "$($entraIdUpnObjDetails.Department)"
+          $entraIdDepartmentRaw = "$($entraIdUpnObjDetails.Department)"
+          $entraIdDepartment = ConvertTo-NormalizedDepartment $entraIdDepartmentRaw
           [bool]$entraIdStatus = [bool]$entraIdUpnObjDetails.AccountEnabled
           $entraIdEmployeeNumber = ConvertTo-TrimmedString "$($entraIdUpnObjDetails.EmployeeId)"
           $entraIdEmployeeNumber2 = ConvertTo-TrimmedString "$($entraIdEidObjDetails.EmployeeId)"
@@ -4024,16 +4025,20 @@ $employees | Sort-Object -Property LastName |
                   }
                 }
 
-                # Checking department if correctly set, if not, configure the Department as set in BambooHR
-                if ($entraIdDepartment -ne $bhrDepartment -and -not [string]::IsNullOrWhiteSpace($bhrDepartment)) {
-                  Write-PSLog -Message "Entra ID department '$entraIdDepartment' does not match BambooHR department '$($bhrDepartment.Trim())'" -Severity Debug
+                # Checking department if correctly set, if not, configure the Department as set in BambooHR.
+                # Use the raw Entra value to detect and fix whitespace-only differences (for example, "Production ").
+                $departmentNeedsValueUpdate = $entraIdDepartment -ne $bhrDepartment
+                $departmentNeedsCanonicalUpdate = $entraIdDepartmentRaw -cne $bhrDepartment
+                if (($departmentNeedsValueUpdate -or $departmentNeedsCanonicalUpdate) -and -not [string]::IsNullOrWhiteSpace($bhrDepartment)) {
+                  $departmentUpdateReason = if ($departmentNeedsValueUpdate) { 'value mismatch' } else { 'canonical mismatch (whitespace/case)' }
+                  Write-PSLog -Message "Entra ID department raw '[$entraIdDepartmentRaw]' (len $($entraIdDepartmentRaw.Length), normalized '$entraIdDepartment') does not match BambooHR department '[$($bhrDepartment.Trim())]' (len $($bhrDepartment.Length)); reason: $departmentUpdateReason" -Severity Debug
                   if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Update User')) {
-                    Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -Department $bhrDepartment" -Severity Debug
+                    Write-PSLog -Message "Executing: Update-MgUser -UserId $bhrWorkEmail -Department [$bhrDepartment] (len $($bhrDepartment.Length))" -Severity Debug
                     try {
                       Invoke-WithRetry -Operation "Update Department for: $bhrWorkEmail" -ScriptBlock {
                         Update-MgUser -UserId $bhrWorkEmail -Department "$bhrDepartment"
                       }
-                      Write-PSLog -Message "Department for $bhrWorkEmail in Entra ID set from '$entraIdDepartment' to '$bhrDepartment'." -Severity Information
+                      Write-PSLog -Message "Department for $bhrWorkEmail in Entra ID set from raw '[$entraIdDepartmentRaw]' (len $($entraIdDepartmentRaw.Length), normalized '$entraIdDepartment') to '[$bhrDepartment]' (len $($bhrDepartment.Length))." -Severity Information
                     }
                     catch {
                       Write-PSLog -Message "Error changing Department of $bhrWorkEmail `nException: $($_.Exception) `nTarget object: $($_.TargetObject) `nDetails: $($_.ErrorDetails) `nStackTrace: $($_.ScriptStackTrace)" -Severity Error

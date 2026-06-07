@@ -137,6 +137,14 @@ Describe 'Static validation' {
     $content | Should -Not -Match $pattern
   }
 
+    It 'uses raw and normalized department values to detect canonicalization-only drift' {
+      $content = Get-Content -Raw -Path $script:staticStartScriptPath
+
+      $content | Should -Match '\$entraIdDepartmentRaw\s*=\s*"\$\(\$entraIdUpnObjDetails\.Department\)"'
+      $content | Should -Match '\$departmentNeedsCanonicalUpdate\s*=\s*\$entraIdDepartmentRaw\s*-cne\s*\$bhrDepartment'
+      $content | Should -Match '\$departmentNeedsValueUpdate\s*=\s*\$entraIdDepartment\s*-ne\s*\$bhrDepartment'
+    }
+
   Context 'PII and sensitive data' {
     It 'source files contain no real org domain' {
       # Pattern is split across two literals so this test file does not match itself
@@ -298,6 +306,7 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
       'Initialize-Configuration',
       'Invoke-WithRetry',
       'ConvertTo-TrimmedString',
+      'ConvertTo-NormalizedDepartment',
       'ConvertTo-StandardName',
       'ConvertTo-PhoneNumber',
       'ConvertTo-BambooHrHireDate',
@@ -532,6 +541,16 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
 
     It 'returns empty string for whitespace-only input' {
       ConvertTo-TrimmedString '   ' | Should -Be ''
+    }
+  }
+
+  Context 'ConvertTo-NormalizedDepartment' {
+    It 'trims and collapses whitespace for canonical department comparisons' {
+      ConvertTo-NormalizedDepartment "  Production   Team  " | Should -Be 'Production Team'
+    }
+
+    It 'returns empty string for null or whitespace-only department values' {
+      ConvertTo-NormalizedDepartment "`t  " | Should -Be ''
     }
   }
 
