@@ -1325,6 +1325,63 @@ function Test-ShouldUpdateEmployeeId {
   ($BhrLastChanged -ne $UpnExtensionAttribute1)
 }
 
+function Get-OffboardingIncompleteMarkers {
+  <#
+  .SYNOPSIS
+  Return the list of offboarding completion markers that are still incomplete.
+  #>
+  [CmdletBinding()]
+  [OutputType([string[]])]
+  param(
+    [Parameter()]
+    [string]$CompanyName,
+
+    [Parameter()]
+    [string]$Department,
+
+    [Parameter()]
+    [string]$JobTitle,
+
+    [Parameter()]
+    [string]$OfficeLocation,
+
+    [Parameter()]
+    [string]$WorkPhone,
+
+    [Parameter()]
+    [string]$MobilePhone
+  )
+
+  $incompleteMarkers = [System.Collections.Generic.List[string]]::new()
+
+  if ($CompanyName -notmatch '^\d{2}/\d{2}/\d{2}') {
+    $incompleteMarkers.Add('CompanyName marker not stamped') | Out-Null
+  }
+  if (-not [string]::IsNullOrWhiteSpace($Department)) {
+    $incompleteMarkers.Add('Department not cleared') | Out-Null
+  }
+  if (-not [string]::IsNullOrWhiteSpace($JobTitle)) {
+    $incompleteMarkers.Add('JobTitle not cleared') | Out-Null
+  }
+  if (-not [string]::IsNullOrWhiteSpace($OfficeLocation)) {
+    $incompleteMarkers.Add('OfficeLocation not cleared') | Out-Null
+  }
+
+  if ($PSBoundParameters.ContainsKey('WorkPhone')) {
+    if ((Get-WorkPhoneComparisonValue -PhoneNumber $WorkPhone) -ne '0') {
+      $incompleteMarkers.Add('WorkPhone not cleared') | Out-Null
+    }
+  }
+
+  if ($PSBoundParameters.ContainsKey('MobilePhone')) {
+    if ((Get-WorkPhoneComparisonValue -PhoneNumber $MobilePhone) -ne '0') {
+      $incompleteMarkers.Add('MobilePhone not cleared') | Out-Null
+    }
+  }
+
+  return @($incompleteMarkers)
+}
+
 function Test-IsOffboardingComplete {
   <#
   .SYNOPSIS
@@ -1352,22 +1409,8 @@ function Test-IsOffboardingComplete {
     [string]$MobilePhone
   )
 
-  $workPhoneCleared = $true
-  if ($PSBoundParameters.ContainsKey('WorkPhone')) {
-    $workPhoneCleared = (Get-WorkPhoneComparisonValue -PhoneNumber $WorkPhone) -eq '0'
-  }
-
-  $mobilePhoneCleared = $true
-  if ($PSBoundParameters.ContainsKey('MobilePhone')) {
-    $mobilePhoneCleared = (Get-WorkPhoneComparisonValue -PhoneNumber $MobilePhone) -eq '0'
-  }
-
-  return ($CompanyName -match '^\d{2}/\d{2}/\d{2}') -and
-  ([string]::IsNullOrWhiteSpace($Department)) -and
-  ([string]::IsNullOrWhiteSpace($JobTitle)) -and
-  ([string]::IsNullOrWhiteSpace($OfficeLocation)) -and
-  $workPhoneCleared -and
-  $mobilePhoneCleared
+  $incompleteMarkers = Get-OffboardingIncompleteMarkers -CompanyName $CompanyName -Department $Department -JobTitle $JobTitle -OfficeLocation $OfficeLocation -WorkPhone $WorkPhone -MobilePhone $MobilePhone
+  return $incompleteMarkers.Count -eq 0
 }
 
 function Set-TerminatedUserProfileFields {
@@ -3857,7 +3900,9 @@ $employees | Sort-Object -Property LastName |
                 $offboardingComplete = Test-IsOffboardingComplete -CompanyName $entraIdCompanyName -Department $entraIdDepartment -JobTitle $entraIdJobTitle -OfficeLocation $entraIdOfficeLocation -WorkPhone $entraIdWorkPhone -MobilePhone $entraIdMobilePhone
 
                 if (-not $offboardingComplete) {
-                  Write-PSLog -Message "$bhrWorkEmail is disabled but offboarding appears incomplete (Company='$entraIdCompanyName', Dept='$entraIdDepartment', Title='$entraIdJobTitle', Office='$entraIdOfficeLocation', WorkPhone='$entraIdWorkPhone', MobilePhone='$entraIdMobilePhone'). Re-running offboarding." -Severity Warning
+                  $offboardingGaps = Get-OffboardingIncompleteMarkers -CompanyName $entraIdCompanyName -Department $entraIdDepartment -JobTitle $entraIdJobTitle -OfficeLocation $entraIdOfficeLocation -WorkPhone $entraIdWorkPhone -MobilePhone $entraIdMobilePhone
+                  $offboardingGapSummary = if ($offboardingGaps.Count -gt 0) { $offboardingGaps -join ', ' } else { 'unknown marker mismatch' }
+                  Write-PSLog -Message "$bhrWorkEmail is disabled but offboarding appears incomplete. Missing markers: $offboardingGapSummary. Re-running offboarding." -Severity Warning
                   # Re-run the same offboarding block that fires when the account transitions
                   # from enabled to disabled. We set $entraIdStatus to $true so the primary
                   # termination condition above will match on the next pass, but since we are
@@ -3865,9 +3910,19 @@ $employees | Sort-Object -Property LastName |
 
                   if ($PSCmdlet.ShouldProcess($bhrWorkEmail, 'Complete missed offboarding (Update Profile, Convert to Shared Mailbox, Remove Licenses and Groups)')) {
                     $leaveDateTimeUtc = (Get-Date).ToUniversalTime()
+                    $errorsBeforeRetry = [int]$errorSummary.TotalErrors
                     Invoke-UserOffboarding -UserId $bhrWorkEmail -UserObjectId $entraIdUpnObjDetails.Id -LeaveDateTimeUtc $leaveDateTimeUtc -SupervisorEmail $entraIdSupervisorEmail -DisplayName $bhrDisplayName -PerformanceCache $performanceCache -ErrorSummary $errorSummary
-                    Add-SignificantChange -Category Disabled -User $bhrWorkEmail -Detail 'Offboarding completed (was incomplete)'
-                    Write-PSLog -Message "Completed missed offboarding for $bhrWorkEmail" -Severity Information
+                    $retryErrorCount = [int]$errorSummary.TotalErrors - $errorsBeforeRetry
+
+                    if ($retryErrorCount -gt 0) {
+                      $retryErrorDetail = if ($errorSummary.ErrorsByUser.ContainsKey($bhrWorkEmail)) { $errorSummary.ErrorsByUser[$bhrWorkEmail] } else { 'See run log for details' }
+                      Add-SignificantChange -Category Disabled -User $bhrWorkEmail -Detail "Offboarding retry incomplete (missing markers: $offboardingGapSummary; retry errors: $retryErrorCount; details: $retryErrorDetail)"
+                      Write-PSLog -Message "Offboarding retry still has $retryErrorCount error(s) for $bhrWorkEmail. Missing markers before retry: $offboardingGapSummary" -Severity Warning
+                    }
+                    else {
+                      Add-SignificantChange -Category Disabled -User $bhrWorkEmail -Detail "Offboarding completed (was incomplete: $offboardingGapSummary)"
+                      Write-PSLog -Message "Completed missed offboarding for $bhrWorkEmail. Previously missing markers: $offboardingGapSummary" -Severity Information
+                    }
                   }
                 }
                 else {
@@ -5059,6 +5114,20 @@ if ($changesWereApplied) {
       $managerChangedCount = $Script:SignificantChanges.ManagerChanged.Count
       $updatedMajorCount = $Script:SignificantChanges.UpdatedMajor.Count
       $hasSignificantChanges = ($createdCount + $disabledCount + $nameChangedCount + $upnChangedCount + $managerChangedCount + $updatedMajorCount) -gt 0
+      $disabledUsersWithErrors = @()
+      if (($disabledCount -gt 0) -and ($errorSummary.TotalErrors -gt 0)) {
+        $disabledUsersWithErrors = @(
+          $Script:SignificantChanges.Disabled.Keys |
+            Sort-Object |
+            Where-Object { $errorSummary.ErrorsByUser.ContainsKey($_) } |
+            ForEach-Object {
+              [PSCustomObject]@{
+                User    = $_
+                Message = $errorSummary.ErrorsByUser[$_]
+              }
+            }
+        )
+      }
 
       New-AdaptiveCard {
         New-AdaptiveTextBlock -Text 'BambooHR to Entra ID Sync - Changes Applied' -Wrap -Weight Bolder -Color Good
@@ -5090,6 +5159,25 @@ if ($changesWereApplied) {
               $detail = $_.Value
               $line = if ([string]::IsNullOrWhiteSpace($detail)) { "- $($_.Name)" } else { "- $($_.Name) ($detail)" }
               New-AdaptiveTextBlock -Text $line -Wrap
+            }
+
+            if ($disabledUsersWithErrors.Count -gt 0) {
+              New-AdaptiveTextBlock -Text 'Offboarding follow-up needed:' -Wrap -Weight Bolder -Color Warning
+              $disabledUsersWithErrors | Select-Object -First $maxExamples | ForEach-Object {
+                $messageText = $_.Message
+                if (-not [string]::IsNullOrWhiteSpace($messageText) -and $messageText.Length -gt 220) {
+                  $messageText = "$($messageText.Substring(0, 220))..."
+                }
+
+                $line = if ([string]::IsNullOrWhiteSpace($messageText)) {
+                  "! $($_.User): Check run logs for offboarding errors"
+                }
+                else {
+                  "! $($_.User): $messageText"
+                }
+
+                New-AdaptiveTextBlock -Text $line -Wrap -Color Warning
+              }
             }
           }
           if ($nameChangedCount -gt 0) {

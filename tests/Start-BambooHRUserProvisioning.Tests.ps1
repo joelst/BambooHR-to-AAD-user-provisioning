@@ -13,7 +13,7 @@ Validates helper functions, configuration overrides, and static checks without e
 [CmdletBinding()]
 param()
 
-function Get-FunctionDefinitionsFromFile {
+function global:Get-FunctionDefinitionsFromFile {
   <#
     .SYNOPSIS
     Extract function definitions from a PowerShell script.
@@ -57,7 +57,7 @@ function Get-FunctionDefinitionsFromFile {
   return $definitions
 }
 
-function Initialize-TestScriptState {
+function global:Initialize-TestScriptState {
   <#
     .SYNOPSIS
     Initialize script-scoped variables needed for configuration tests.
@@ -93,12 +93,13 @@ function Initialize-TestScriptState {
   $script:DaysToKeepAccountsAfterTermination = 14
   $script:EnableMobilePhoneSync = $false
   $script:CurrentOnly = $false
-  $script:ForceSharedMailboxPermissions
+  $script:ForceSharedMailboxPermissions = $false
   $script:DefaultProfilePicPath = ''
   $script:EmailSignature = ''
   $script:WelcomeUserText = ''
   $script:WelcomeLinksHtml = ''
   $script:MailboxDelegationParams = @()
+  $script:ForceActiveUserAttributeRecheck = $false
   $script:ModifiedWithinDays = 14
   $script:FullSync = $false
   $script:LogPath = $env:TEMP
@@ -137,13 +138,13 @@ Describe 'Static validation' {
     $content | Should -Not -Match $pattern
   }
 
-    It 'uses raw and normalized department values to detect canonicalization-only drift' {
-      $content = Get-Content -Raw -Path $script:staticStartScriptPath
+  It 'uses raw and normalized department values to detect canonicalization-only drift' {
+    $content = Get-Content -Raw -Path $script:staticStartScriptPath
 
-      $content | Should -Match '\$entraIdDepartmentRaw\s*=\s*"\$\(\$entraIdUpnObjDetails\.Department\)"'
-      $content | Should -Match '\$departmentNeedsCanonicalUpdate\s*=\s*\$entraIdDepartmentRaw\s*-cne\s*\$bhrDepartment'
-      $content | Should -Match '\$departmentNeedsValueUpdate\s*=\s*\$entraIdDepartment\s*-ne\s*\$bhrDepartment'
-    }
+    $content | Should -Match '\$entraIdDepartmentRaw\s*=\s*"\$\(\$entraIdUpnObjDetails\.Department\)"'
+    $content | Should -Match '\$departmentNeedsCanonicalUpdate\s*=\s*\$entraIdDepartmentRaw\s*-cne\s*\$bhrDepartment'
+    $content | Should -Match '\$departmentNeedsValueUpdate\s*=\s*\$entraIdDepartment\s*-ne\s*\$bhrDepartment'
+  }
 
   Context 'PII and sensitive data' {
     It 'source files contain no real org domain' {
@@ -214,91 +215,6 @@ Describe 'Static validation' {
 
 Describe 'Start-BambooHRUserProvisioning helpers' {
   BeforeAll {
-    function script:Get-FunctionDefinitionsFromFile {
-      <#
-        .SYNOPSIS
-        Extract function definitions from a PowerShell script.
-        #>
-      [CmdletBinding()]
-      param(
-        [Parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
-        [string]$ScriptPath,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
-        [string[]]$FunctionNames
-      )
-
-      $tokens = $null
-      $errors = $null
-      $ast = [System.Management.Automation.Language.Parser]::ParseFile($ScriptPath, [ref]$tokens, [ref]$errors)
-
-      if ($errors) {
-        $message = ($errors | ForEach-Object { $_.Message }) -join '; '
-        throw "Failed to parse $($ScriptPath): $message"
-      }
-
-      $definitions = @()
-      $functions = $ast.FindAll({
-          param($node)
-          $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $FunctionNames -contains $node.Name
-        }, $true)
-
-      foreach ($functionAst in $functions) {
-        $definitions += $functionAst.Extent.Text
-      }
-
-      return $definitions
-    }
-
-    function script:Initialize-TestScriptState {
-      <#
-        .SYNOPSIS
-        Initialize script-scoped variables needed for configuration tests.
-        #>
-      [CmdletBinding()]
-      param(
-        [Parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
-        [string]$CompanyName,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
-        [string]$TenantId
-      )
-
-      $script:BambooHrApiKey = 'test-key'
-      $script:BHRCompanyName = 'contoso'
-      $script:CompanyName = $CompanyName
-      $script:TenantId = $TenantId
-      $script:TeamsCardUri = 'https://example.webhook.office.com/'
-      $script:AdminEmailAddress = 'admin@contoso.com'
-      $script:NotificationEmailAddress = 'hr@contoso.com'
-      $script:HelpDeskEmailAddress = 'helpdesk@contoso.com'
-      $script:LicenseId = ''
-      $script:UsageLocation = 'US'
-      $script:DaysAhead = 7
-      $script:DaysToKeepAccountsAfterTermination = 14
-      $script:EnableMobilePhoneSync = $false
-      $script:CurrentOnly = $false
-      $script:ForceSharedMailboxPermissions = $false
-      $script:DefaultProfilePicPath = ''
-      $script:EmailSignature = ''
-      $script:WelcomeUserText = ''
-      $script:WelcomeLinksHtml = ''
-      $script:MailboxDelegationParams = @()
-      $script:ForceActiveUserAttributeRecheck = $false
-      $script:LogPath = $env:TEMP
-      $script:MaxRetryAttempts = 3
-      $script:RetryDelaySeconds = 5
-      $script:OperationTimeoutSeconds = 120
-      $script:BatchSize = 25
-      $script:PSBoundParameters = $PSBoundParameters
-      $script:CorrelationId = [Guid]::NewGuid().ToString()
-      $script:StartTime = Get-Date
-    }
-
     $script:helperRepoRoot = Split-Path -Parent $PSScriptRoot
     $script:startScriptPath = Join-Path $script:helperRepoRoot 'Start-BambooHRUserProvisioning.ps1'
 
@@ -314,6 +230,7 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
       'Test-IsTenantEmail',
       'Get-MailNicknameFromEmail',
       'Get-WorkPhoneComparisonValue',
+      'Get-OffboardingIncompleteMarkers',
       'Test-ShouldSyncExistingUser',
       'Test-ShouldSendTeamsChangesCard',
       'Test-ShouldUpdateEmployeeId',
@@ -325,9 +242,10 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
       'Write-TerminatedAccountDeletionReminders',
       'Invoke-UserOffboarding'
     )
-    $definitions = Get-FunctionDefinitionsFromFile -ScriptPath $startScriptPath -FunctionNames $functionNames
+    $definitions = global:Get-FunctionDefinitionsFromFile -ScriptPath $startScriptPath -FunctionNames $functionNames
     foreach ($definition in $definitions) {
-      Invoke-Expression $definition
+      $scriptBlock = $ExecutionContext.InvokeCommand.NewScriptBlock($definition)
+      . $scriptBlock
     }
 
     function Get-AutomationVariable {
@@ -416,7 +334,7 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
 
   Context 'Initialize-Configuration' {
     BeforeEach {
-      Initialize-TestScriptState -CompanyName 'Contoso' -TenantId 'contoso.onmicrosoft.com'
+      global:Initialize-TestScriptState -CompanyName 'Contoso' -TenantId 'contoso.onmicrosoft.com'
       Mock Get-AutomationVariable { $null }
     }
 
@@ -452,9 +370,9 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
 
     It 'applies JSON boolean overrides for feature switches' {
       $customJson = @{
-        EnableMobilePhoneSync         = $true
-        CurrentOnly                   = $true
-        ForceSharedMailboxPermissions = $true
+        EnableMobilePhoneSync           = $true
+        CurrentOnly                     = $true
+        ForceSharedMailboxPermissions   = $true
         ForceActiveUserAttributeRecheck = $true
       } | ConvertTo-Json
 
@@ -546,7 +464,7 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
 
   Context 'ConvertTo-NormalizedDepartment' {
     It 'trims and collapses whitespace for canonical department comparisons' {
-      ConvertTo-NormalizedDepartment "  Production   Team  " | Should -Be 'Production Team'
+      ConvertTo-NormalizedDepartment '  Production   Team  ' | Should -Be 'Production Team'
     }
 
     It 'returns empty string for null or whitespace-only department values' {
@@ -776,6 +694,23 @@ Describe 'Start-BambooHRUserProvisioning helpers' {
   }
 
   Context 'Offboarding completion helpers' {
+    It 'returns a detailed marker list for incomplete offboarding state' {
+      $markers = Get-OffboardingIncompleteMarkers -CompanyName 'Gecko Green' -Department 'Sales' -JobTitle 'Rep' -OfficeLocation 'Phoenix' -WorkPhone '5551234567' -MobilePhone '5550000000'
+
+      $markers | Should -Contain 'CompanyName marker not stamped'
+      $markers | Should -Contain 'Department not cleared'
+      $markers | Should -Contain 'JobTitle not cleared'
+      $markers | Should -Contain 'OfficeLocation not cleared'
+      $markers | Should -Contain 'WorkPhone not cleared'
+      $markers | Should -Contain 'MobilePhone not cleared'
+    }
+
+    It 'returns no markers when offboarding state is fully complete' {
+      $markers = Get-OffboardingIncompleteMarkers -CompanyName '03/26/26 (OffboardingComplete: 2026-03-26T04:00:00Z)' -Department '' -JobTitle '' -OfficeLocation '' -WorkPhone '' -MobilePhone ''
+
+      @($markers).Count | Should -Be 0
+    }
+
     It 'detects completed offboarding markers' {
       Test-IsOffboardingComplete -CompanyName '03/26/26 (OffboardingComplete: 2026-03-26T04:00:00Z)' -Department '' -JobTitle '' -OfficeLocation '' -WorkPhone '' -MobilePhone '' | Should -BeTrue
     }
@@ -968,28 +903,28 @@ Describe 'Terminated user email-mismatch handling' {
     It 'passes active employee with company email' {
       $employee = [PSCustomObject]@{ workEmail = 'john@contoso.com'; status = 'Active' }
       $domain = 'contoso.com'
-      $result = @($employee) | Where-Object { $_.workEmail -like "*$domain" -or $_.status -eq 'Inactive' }
+      $result = @($employee) | Where-Object { $_.workEmail -like "*@$domain" -or $_.status -eq 'Inactive' }
       $result.Count | Should -Be 1
     }
 
     It 'passes inactive employee without company email' {
       $employee = [PSCustomObject]@{ workEmail = ''; status = 'Inactive' }
       $domain = 'contoso.com'
-      $result = @($employee) | Where-Object { $_.workEmail -like "*$domain" -or $_.status -eq 'Inactive' }
+      $result = @($employee) | Where-Object { $_.workEmail -like "*@$domain" -or $_.status -eq 'Inactive' }
       $result.Count | Should -Be 1
     }
 
     It 'passes inactive employee with personal email' {
       $employee = [PSCustomObject]@{ workEmail = 'john@gmail.com'; status = 'Inactive' }
       $domain = 'contoso.com'
-      $result = @($employee) | Where-Object { $_.workEmail -like "*$domain" -or $_.status -eq 'Inactive' }
+      $result = @($employee) | Where-Object { $_.workEmail -like "*@$domain" -or $_.status -eq 'Inactive' }
       $result.Count | Should -Be 1
     }
 
     It 'excludes active employee without company email' {
       $employee = [PSCustomObject]@{ workEmail = 'john@gmail.com'; status = 'Active' }
       $domain = 'contoso.com'
-      $result = @($employee) | Where-Object { $_.workEmail -like "*$domain" -or $_.status -eq 'Inactive' }
+      $result = @($employee) | Where-Object { $_.workEmail -like "*@$domain" -or $_.status -eq 'Inactive' }
       $result.Count | Should -Be 0
     }
   }
@@ -1133,24 +1068,12 @@ Describe 'Offboarding resilience' {
     $script:helperRepoRoot = Split-Path -Parent $PSScriptRoot
     $script:startScriptPath = Join-Path $script:helperRepoRoot 'Start-BambooHRUserProvisioning.ps1'
 
-    function script:Get-FunctionDefinitionsFromFile {
-      [CmdletBinding()]
-      param(
-        [Parameter(Mandatory = $true)][string]$ScriptPath,
-        [Parameter(Mandatory = $true)][string[]]$FunctionNames
-      )
-      $tokens = $null; $errors = $null
-      $ast = [System.Management.Automation.Language.Parser]::ParseFile($ScriptPath, [ref]$tokens, [ref]$errors)
-      if ($errors) { throw "Parse error: $(($errors | ForEach-Object { $_.Message }) -join '; ')" }
-      $definitions = @()
-      $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $FunctionNames -contains $n.Name }, $true) |
-        ForEach-Object { $definitions += $_.Extent.Text }
-      return $definitions
+    $functionNames = @('Invoke-WithRetry', 'Set-TerminatedUserProfileFields', 'Test-IsOffboardingComplete', 'Get-OffboardingIncompleteMarkers', 'Get-WorkPhoneComparisonValue', 'Get-OffboardingCompletionMarker', 'Invoke-UserOffboarding', 'ConvertTo-PhoneNumber')
+    $definitions = global:Get-FunctionDefinitionsFromFile -ScriptPath $script:startScriptPath -FunctionNames $functionNames
+    foreach ($def in $definitions) {
+      $scriptBlock = $ExecutionContext.InvokeCommand.NewScriptBlock($def)
+      . $scriptBlock
     }
-
-    $functionNames = @('Invoke-WithRetry', 'Set-TerminatedUserProfileFields', 'Test-IsOffboardingComplete', 'Get-WorkPhoneComparisonValue', 'Get-OffboardingCompletionMarker', 'Invoke-UserOffboarding', 'ConvertTo-PhoneNumber')
-    $definitions = Get-FunctionDefinitionsFromFile -ScriptPath $script:startScriptPath -FunctionNames $functionNames
-    foreach ($def in $definitions) { Invoke-Expression $def }
 
     function Write-PSLog { [CmdletBinding()] param([string]$Message, [string]$Severity) Write-Verbose $Message }
     function Get-MgUser {
